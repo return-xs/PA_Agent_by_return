@@ -12,8 +12,7 @@ Coordinates the full Stage 1 (diagnosis) → Stage 2 (decision) pipeline:
   9. Persist full record
 
 Cancel checks are performed before each stage and after each API call.
-Network/timeout errors are caught and recorded without incrementing the
-consecutive exception counter (design §B.14, R8.9).
+Network/timeout errors are caught and recorded on the partial record.
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
     from pa_agent.ai.json_validator import JsonValidator
     from pa_agent.ai.prompt_assembler import PromptAssembler
     from pa_agent.config.settings import Settings
-    from pa_agent.orchestrator.exception_counter import ExceptionCounter
     from pa_agent.records.experience_reader import ExperienceReader
     from pa_agent.records.pending_writer import PendingWriter
 
@@ -38,6 +36,119 @@ from pa_agent.util.threading import CancelToken, OrchestratorEvent
 from pa_agent.util.timefmt import now_local_ms
 
 logger = logging.getLogger(__name__)
+
+# When the gateway buffers the full reply, emit pseudo-stream chunks to the UI.
+_FALLBACK_STREAM_CHUNK = 48
+
+
+def _json_truncation_hint(content: str, err: ValidationError) -> str | None:
+    """Detect incomplete JSON (stream stopped mid-object) vs a stray syntax typo."""
+    if err.category != "a":
+        return None
+    stripped = (content or "").strip()
+    if not stripped.startswith("{"):
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for ch in stripped:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+    if depth > 0 or not stripped.rstrip().endswith("}"):
+        return (
+            f"阶段 JSON 正文约 {len(stripped)} 字符，在输出过程中被截断"
+            f"（未闭合对象约 {max(depth, 1)} 层，解析位置 {err.parse_position}）。"
+            " 常见原因：completion 额度主要在思考区用尽，正文 JSON 只写了一小段。"
+        )
+    return None
+
+
+def _enrich_stage2_validation_message(err: ValidationError, reply: Any) -> str:
+    """Add actionable context for empty content or truncated JSON."""
+    content = (getattr(reply, "content", None) or "").strip()
+    trunc = _json_truncation_hint(content, err)
+    if trunc:
+        usage = getattr(reply, "usage", None)
+        completion = getattr(usage, "completion_tokens", 0) if usage else 0
+        reasoning_len = len(getattr(reply, "reasoning_content", None) or "")
+        return f"{err.message}。{trunc} completion_tokens≈{completion}，思考区约 {reasoning_len} 字。"
+    if err.category != "d" or (err.raw_text or "").strip():
+        return err.message
+    if content:
+        return err.message
+    reasoning = getattr(reply, "reasoning_content", None) or ""
+    usage = getattr(reply, "usage", None)
+    completion = getattr(usage, "completion_tokens", 0) if usage else 0
+    if reasoning and "{" not in reasoning:
+        return (
+            f"{err.message}：扩展思考已输出约 {len(reasoning)} 字，但正文 content 为空，"
+            f"且思考中未见 JSON（completion_tokens≈{completion}）。"
+            " 常见原因是思考在输出阶段二 JSON 前被截断或网关提前结束流。"
+            " 请缩短 prompt、检查 Packy 分组限额，或调整模型/Reasoning Effort 后重新分析。"
+        )
+    if reasoning:
+        return (
+            f"{err.message}：正文 content 为空；请把阶段二 JSON 写在 content 正文，"
+            "不要只写在思考区。"
+        )
+    return err.message
+
+
+def _enrich_stage1_validation_message(err: ValidationError, reply: Any) -> str:
+    """Add actionable context for empty content or truncated JSON."""
+    content = (getattr(reply, "content", None) or "").strip()
+    trunc = _json_truncation_hint(content, err)
+    if trunc:
+        usage = getattr(reply, "usage", None)
+        completion = getattr(usage, "completion_tokens", 0) if usage else 0
+        reasoning_len = len(getattr(reply, "reasoning_content", None) or "")
+        return f"{err.message}。{trunc} completion_tokens≈{completion}，思考区约 {reasoning_len} 字。"
+    if err.category != "d" or (err.raw_text or "").strip():
+        return err.message
+    if content:
+        return err.message
+    reasoning = getattr(reply, "reasoning_content", None) or ""
+    usage = getattr(reply, "usage", None)
+    completion = getattr(usage, "completion_tokens", 0) if usage else 0
+    if reasoning and "{" not in reasoning:
+        return (
+            f"{err.message}：扩展思考已输出约 {len(reasoning)} 字，但正文 content 为空，"
+            f"且思考中未见 JSON（completion_tokens≈{completion}）。"
+            " 常见原因是思考占满输出额度后被截断。"
+            " 请缩短 prompt、检查网关输出上限，或调整 Reasoning Effort 后重新分析。"
+        )
+    if reasoning:
+        return (
+            f"{err.message}：正文 content 为空；请把阶段一 JSON 写在 content 正文，"
+            "不要只写在思考区。"
+        )
+    return err.message
+
+
+def _emit_buffered_stream(
+    text: str,
+    on_token: Callable[[str], None] | None,
+    *,
+    chunk_size: int = _FALLBACK_STREAM_CHUNK,
+) -> bool:
+    """Push *text* through *on_token* in slices if the API did not stream deltas."""
+    if on_token is None or not text:
+        return False
+    for i in range(0, len(text), chunk_size):
+        on_token(text[i : i + chunk_size])
+    return True
 
 
 def _build_empty_record(
@@ -70,6 +181,14 @@ def _build_empty_record(
         else:
             kline_data.append(bar.__dict__)
 
+    from pa_agent.ai.decision_stance import normalize_stance
+
+    decision_stance = "conservative"
+    if settings is not None:
+        decision_stance = normalize_stance(
+            getattr(settings.general, "decision_stance", "conservative")
+        )
+
     meta = RecordMeta(
         timestamp_local_iso=ts_iso,
         timestamp_local_ms=ts_ms,
@@ -77,6 +196,7 @@ def _build_empty_record(
         timeframe=frame.timeframe,
         bar_count=len(frame.bars),
         ai_provider=ai_provider,
+        decision_stance=decision_stance,
     )
 
     return AnalysisRecord(
@@ -129,8 +249,6 @@ class TwoStageOrchestrator:
         ``.route()`` method.
     validator:
         JsonValidator for validating Stage 1 and Stage 2 responses.
-    exc_counter:
-        ExceptionCounter for tracking consecutive validation failures.
     pending_writer:
         PendingWriter for persisting full and partial records.
     exp_reader:
@@ -146,7 +264,6 @@ class TwoStageOrchestrator:
         assembler: "PromptAssembler",
         router: Any,
         validator: "JsonValidator",
-        exc_counter: "ExceptionCounter",
         pending_writer: "PendingWriter",
         exp_reader: "ExperienceReader",
         settings: Optional["Settings"] = None,
@@ -155,7 +272,6 @@ class TwoStageOrchestrator:
         self._assembler = assembler
         self._router = router
         self._validator = validator
-        self._exc_counter = exc_counter
         self._pending_writer = pending_writer
         self._exp_reader = exp_reader
         self._settings = settings
@@ -174,6 +290,8 @@ class TwoStageOrchestrator:
         on_stage2_content: Callable[[str], None] | None = None,
         on_stage_prompt: Callable[[str, str, str], None] | None = None,
         on_stage2_files: Callable[[list[str]], None] | None = None,
+        previous_record: AnalysisRecord | None = None,
+        incremental_new_bar_count: int | None = None,
     ) -> AnalysisRecord:
         """Run the two-stage analysis pipeline and return an AnalysisRecord.
 
@@ -202,7 +320,6 @@ class TwoStageOrchestrator:
         # ── Step 2: Pre-Stage-1 cancel check ─────────────────────────────────
         if cancel_token.is_set():
             self._pending_writer.save_partial(record, "user_cancelled")
-            self._exc_counter.on_user_cancel("pre_stage1")
             on_event(OrchestratorEvent.Cancelled)
             return record
 
@@ -210,7 +327,14 @@ class TwoStageOrchestrator:
         on_event(OrchestratorEvent.Stage1Started)
 
         # ── Step 4: Build Stage 1 messages ───────────────────────────────────
-        messages_s1 = self._assembler.build_stage1(frame)
+        if previous_record is not None and incremental_new_bar_count is not None:
+            messages_s1 = self._assembler.build_incremental_stage1(
+                frame,
+                previous_record,
+                incremental_new_bar_count,
+            )
+        else:
+            messages_s1 = self._assembler.build_stage1(frame)
 
         # ── Step 5: Call AI for Stage 1 ───────────────────────────────────────
         print("\n" + "="*80)
@@ -229,11 +353,26 @@ class TwoStageOrchestrator:
             on_stage_prompt("stage1", s1_system, s1_user)
 
         _thinking, _effort = self._thinking_params()
+        s1_streamed_reasoning = False
+        s1_streamed_content = False
+
+        def _on_s1_reasoning(chunk: str) -> None:
+            nonlocal s1_streamed_reasoning
+            s1_streamed_reasoning = True
+            if on_stage1_reasoning is not None:
+                on_stage1_reasoning(chunk)
+
+        def _on_s1_content(chunk: str) -> None:
+            nonlocal s1_streamed_content
+            s1_streamed_content = True
+            if on_stage1_content is not None:
+                on_stage1_content(chunk)
+
         try:
             reply_s1 = self._client.stream_chat(
                 messages_s1,
-                on_reasoning_token=on_stage1_reasoning,
-                on_content_token=on_stage1_content,
+                on_reasoning_token=_on_s1_reasoning,
+                on_content_token=_on_s1_content,
                 cancel_token=cancel_token,
                 thinking=_thinking,
                 reasoning_effort=_effort,
@@ -251,11 +390,15 @@ class TwoStageOrchestrator:
                         },
                     }
                 )
-                self._exc_counter.on_network_error(exc)
                 self._pending_writer.save_partial(record, "network_error")
                 on_event(OrchestratorEvent.Stage1Failed)
                 return record
             raise
+
+        if not s1_streamed_reasoning and reply_s1.reasoning_content:
+            _emit_buffered_stream(reply_s1.reasoning_content, on_stage1_reasoning)
+        if not s1_streamed_content and reply_s1.content:
+            _emit_buffered_stream(reply_s1.content, on_stage1_content)
 
         # ── Step 6: Post-Stage-1-call cancel check ────────────────────────────
         if cancel_token.is_set():
@@ -267,7 +410,6 @@ class TwoStageOrchestrator:
                 }
             )
             self._pending_writer.save_partial(record, "user_cancelled")
-            self._exc_counter.on_user_cancel("post_stage1_chat")
             on_event(OrchestratorEvent.Cancelled)
             return record
 
@@ -285,12 +427,12 @@ class TwoStageOrchestrator:
 
         if isinstance(result_s1, ValidationError):
             err = result_s1
+            err_message = _enrich_stage1_validation_message(err, reply_s1)
             logger.warning(
                 "Stage 1 validation failed: category=%s message=%s",
                 err.category,
-                err.message,
+                err_message,
             )
-            self._exc_counter.on_validation_error("stage1", err)
             record = record.model_copy(
                 update={
                     "stage1_messages": messages_s1,
@@ -300,7 +442,7 @@ class TwoStageOrchestrator:
                         "type": "validation_error",
                         "stage": "stage1",
                         "category": err.category,
-                        "message": err.message,
+                        "message": err_message,
                         "missing_fields": err.missing_fields,
                         "invalid_fields": err.invalid_fields,
                         "raw_text": err.raw_text,
@@ -345,7 +487,6 @@ class TwoStageOrchestrator:
                 }
             )
             self._pending_writer.save_partial(record, "user_cancelled")
-            self._exc_counter.on_user_cancel("pre_stage2")
             on_event(OrchestratorEvent.Cancelled)
             return record
 
@@ -358,9 +499,16 @@ class TwoStageOrchestrator:
         if gate_result in ("wait", "unknown"):
             from pa_agent.ai.decision_tree import build_stage2_gate_wait_response
 
+            if on_stage_prompt is not None:
+                on_stage_prompt("stage2", "", "（阶段一闸门未通过，跳过阶段二模型调用）")
+            short_msg = (
+                f"阶段一 gate_result={gate_result}，程序已短路生成阶段二结果，"
+                "未向模型发起请求。\n"
+            )
+            _emit_buffered_stream(short_msg, on_stage2_content)
+
             stage2_json = build_stage2_gate_wait_response(stage1_json)
             on_event(OrchestratorEvent.Stage2Done)
-            self._exc_counter.on_round_trip_success()
             usage_total = _accumulate_usage(record.usage_total, reply_s1.usage)
             record = record.model_copy(
                 update={
@@ -384,8 +532,14 @@ class TwoStageOrchestrator:
             return record
 
         # ── Step 14: Build Stage 2 messages ───────────────────────────────────
-        messages_s2 = self._assembler.build_stage2(
-            frame, stage1_json, strategy_files, experience_entries
+        messages_s2 = self._assembler.build_stage2_continuation(
+            frame=frame,
+            stage1_messages=messages_s1,
+            stage1_reply_content=reply_s1.content,
+            stage1_json=stage1_json,
+            strategy_files=strategy_files,
+            experience_entries=experience_entries,
+            decision_stance=record.meta.decision_stance,
         )
 
         # ── Step 15: Call AI for Stage 2 ──────────────────────────────────────
@@ -401,14 +555,29 @@ class TwoStageOrchestrator:
         # Notify conversation tab of the prompt being sent
         if on_stage_prompt is not None:
             s2_system = next((m.get("content", "") for m in messages_s2 if m.get("role") == "system"), "")
-            s2_user = next((m.get("content", "") for m in messages_s2 if m.get("role") == "user"), "")
+            s2_user = next((m.get("content", "") for m in reversed(messages_s2) if m.get("role") == "user"), "")
             on_stage_prompt("stage2", s2_system, s2_user)
+
+        s2_streamed_reasoning = False
+        s2_streamed_content = False
+
+        def _on_s2_reasoning(chunk: str) -> None:
+            nonlocal s2_streamed_reasoning
+            s2_streamed_reasoning = True
+            if on_stage2_reasoning is not None:
+                on_stage2_reasoning(chunk)
+
+        def _on_s2_content(chunk: str) -> None:
+            nonlocal s2_streamed_content
+            s2_streamed_content = True
+            if on_stage2_content is not None:
+                on_stage2_content(chunk)
 
         try:
             reply_s2 = self._client.stream_chat(
                 messages_s2,
-                on_reasoning_token=on_stage2_reasoning,
-                on_content_token=on_stage2_content,
+                on_reasoning_token=_on_s2_reasoning,
+                on_content_token=_on_s2_content,
                 cancel_token=cancel_token,
                 thinking=_thinking,
                 reasoning_effort=_effort,
@@ -435,11 +604,15 @@ class TwoStageOrchestrator:
                         },
                     }
                 )
-                self._exc_counter.on_network_error(exc)
                 self._pending_writer.save_partial(record, "network_error")
                 on_event(OrchestratorEvent.Stage2Failed)
                 return record
             raise
+
+        if not s2_streamed_reasoning and reply_s2.reasoning_content:
+            _emit_buffered_stream(reply_s2.reasoning_content, on_stage2_reasoning)
+        if not s2_streamed_content and reply_s2.content:
+            _emit_buffered_stream(reply_s2.content, on_stage2_content)
 
         # ── Step 16: Post-Stage-2-call cancel check ───────────────────────────
         if cancel_token.is_set():
@@ -462,7 +635,6 @@ class TwoStageOrchestrator:
                 }
             )
             self._pending_writer.save_partial(record, "user_cancelled")
-            self._exc_counter.on_user_cancel("post_stage2_chat")
             on_event(OrchestratorEvent.Cancelled)
             return record
 
@@ -480,12 +652,12 @@ class TwoStageOrchestrator:
 
         if isinstance(result_s2, ValidationError):
             err = result_s2
+            err_message = _enrich_stage2_validation_message(err, reply_s2)
             logger.warning(
                 "Stage 2 validation failed: category=%s message=%s",
                 err.category,
-                err.message,
+                err_message,
             )
-            self._exc_counter.on_validation_error("stage2", err)
             record = record.model_copy(
                 update={
                     "stage1_messages": messages_s1,
@@ -506,7 +678,7 @@ class TwoStageOrchestrator:
                         "type": "validation_error",
                         "stage": "stage2",
                         "category": err.category,
-                        "message": err.message,
+                        "message": err_message,
                         "missing_fields": err.missing_fields,
                         "invalid_fields": err.invalid_fields,
                         "raw_text": err.raw_text,
@@ -525,10 +697,7 @@ class TwoStageOrchestrator:
         # ── Step 19: Stage 2 done ─────────────────────────────────────────────
         on_event(OrchestratorEvent.Stage2Done)
 
-        # ── Step 20: Reset exception counter on full success ──────────────────
-        self._exc_counter.on_round_trip_success()
-
-        # ── Step 21: Build final record ───────────────────────────────────────
+        # ── Step 20: Build final record ───────────────────────────────────────
         usage_total = _accumulate_usage(
             _accumulate_usage(record.usage_total, reply_s1.usage),
             reply_s2.usage,

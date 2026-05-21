@@ -28,10 +28,25 @@ def _reasoning_from_response(response: dict | None) -> str:
     return str(msg.get("reasoning_content") or "")
 
 
-def _prompt_parts(messages: list[dict] | None) -> tuple[str, str]:
+def _content_from_response(response: dict | None) -> str:
+    """Extract answer text (e.g. Stage 2 JSON) from a persisted API response."""
+    if not isinstance(response, dict):
+        return ""
+    top = response.get("content")
+    if isinstance(top, str) and top.strip():
+        return top
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    return str(msg.get("content") or "")
+
+
+def _prompt_parts(messages: list[dict] | None, *, last_user: bool = False) -> tuple[str, str]:
     msgs = messages or []
     system = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
-    user = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+    user_messages = reversed(msgs) if last_user else msgs
+    user = next((m.get("content", "") for m in user_messages if m.get("role") == "user"), "")
     return str(system), str(user)
 
 
@@ -49,6 +64,7 @@ class DemoReplayer(QObject):
     record_ready = pyqtSignal(object)
     status_update = pyqtSignal(str)
     reasoning_token = pyqtSignal(str, str)
+    content_token = pyqtSignal(str, str)
     stage_prompt_ready = pyqtSignal(str, str, str)
     stage2_files_ready = pyqtSignal(list)
     replay_finished = pyqtSignal()
@@ -77,9 +93,10 @@ class DemoReplayer(QObject):
         steps: list[tuple[int, Callable[[], None]]] = []
 
         s1_sys, s1_user = _prompt_parts(r.stage1_messages)
-        s2_sys, s2_user = _prompt_parts(r.stage2_messages)
+        s2_sys, s2_user = _prompt_parts(r.stage2_messages, last_user=True)
         s1_reason = _reasoning_from_response(r.stage1_response)
         s2_reason = _reasoning_from_response(r.stage2_response)
+        s2_content = _content_from_response(r.stage2_response)
         strategy = list(r.strategy_files_used or [])
 
         def add(delay: int, fn: Callable[[], None]) -> None:
@@ -97,6 +114,9 @@ class DemoReplayer(QObject):
             add(80, lambda: self.stage_prompt_ready.emit("stage2", s2_sys, s2_user))
             for ch in _chars_for_stream(s2_reason):
                 add(_CHAR_MS, lambda c=ch: self.reasoning_token.emit("stage2", c))
+            if not s2_reason and s2_content:
+                for ch in _chars_for_stream(s2_content):
+                    add(_CHAR_MS, lambda c=ch, s="stage2": self.content_token.emit(s, c))
             add(_STAGE_GAP_MS, lambda: self.status_update.emit("阶段二完成"))
 
         # Match real worker: stream ends, then record persisted, then record_ready → finished.

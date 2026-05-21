@@ -24,8 +24,8 @@ def _make_text_reply(text: str) -> MagicMock:
     return reply
 
 
-def test_stage1_plain_text(frame, exc_counter, pending_writer, assembler, exp_reader):
-    """Stage 1 returns plain text → consecutive_count increments, Stage2 never starts."""
+def test_stage1_plain_text(frame, pending_writer, assembler, exp_reader):
+    """Stage 1 returns plain text → Stage2 never starts."""
     client = MagicMock()
     client.stream_chat.return_value = _make_text_reply(
         "Sorry, I cannot provide a JSON response right now."
@@ -37,7 +37,6 @@ def test_stage1_plain_text(frame, exc_counter, pending_writer, assembler, exp_re
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -50,9 +49,6 @@ def test_stage1_plain_text(frame, exc_counter, pending_writer, assembler, exp_re
         cancel_token=cancel_token,
         on_event=events.append,
     )
-
-    # consecutive_count incremented by 1
-    assert exc_counter.consecutive_count == 1
 
     # save_partial was called with a reason containing "stage1"
     pending_writer.save_partial.assert_called_once()

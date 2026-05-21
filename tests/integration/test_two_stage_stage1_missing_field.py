@@ -27,8 +27,8 @@ def _make_reply(content_dict: dict) -> MagicMock:
     return reply
 
 
-def test_stage1_missing_cycle_position(frame, exc_counter, pending_writer, assembler, exp_reader):
-    """Stage 1 JSON missing cycle_position → category 'b', consecutive_count == 1."""
+def test_stage1_missing_cycle_position(frame, pending_writer, assembler, exp_reader):
+    """Stage 1 JSON missing cycle_position → category 'b'."""
     # Build stage1 JSON without cycle_position
     bad_stage1 = {k: v for k, v in VALID_STAGE1.items() if k != "cycle_position"}
 
@@ -41,7 +41,6 @@ def test_stage1_missing_cycle_position(frame, exc_counter, pending_writer, assem
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -58,9 +57,6 @@ def test_stage1_missing_cycle_position(frame, exc_counter, pending_writer, assem
     # Validation error category should be 'b' (missing field)
     assert record.exception is not None
     assert record.exception["category"] == "b"
-
-    # consecutive_count incremented by 1
-    assert exc_counter.consecutive_count == 1
 
     # Stage2 never started
     assert OrchestratorEvent.Stage2Started not in events

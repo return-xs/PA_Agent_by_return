@@ -1,0 +1,34 @@
+BASE=https://www.packyapi.com/v1 MODEL=claude-haiku-4-5-20251001
+
+=== models (first 40) ===
+count=5
+  claude-haiku-4-5-20251001
+  claude-opus-4-5-20251101
+  claude-opus-4-6
+  claude-opus-4-7
+  claude-sonnet-4-6
+
+=== baseline ===
+request: {"model": "claude-haiku-4-5-20251001", "stream": false, "max_tokens": 512}
+reasoning_len=0 content_len=1
+content_preview: 2
+usage: {"prompt_tokens": 24, "completion_tokens": 1, "total_tokens": 25, "prompt_tokens_details": {"cached_tokens": 49, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 0, "output_tokens": 0, "input_tokens_details": null}
+
+=== reasoning_effort_medium ===
+request: {"model": "claude-haiku-4-5-20251001", "stream": false, "max_tokens": 2048, "reasoning_effort": "medium"}
+reasoning_len=0 content_len=1
+content_preview: 2
+usage: {"prompt_tokens": 24, "completion_tokens": 1, "total_tokens": 25, "prompt_tokens_details": {"cached_tokens": 50, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 0, "output_tokens": 0, "input_tokens_details": null}
+
+=== thinking_budget ===
+request: {"model": "claude-haiku-4-5-20251001", "stream": false, "max_tokens": 2048, "thinking": {"type": "enabled", "budget_tokens": 8192}}
+reasoning_len=263 content_len=3
+reasoning_preview:  The user is asking "1+1=?" and then says "只答数字" which means "only answer with the number" in Chinese.  So they want me to answer with just the number, no explanation.  1+1 = 2  I should respond in Chinese since that's the language they used for the instruction. 
+content_preview:   2
+usage: {"prompt_tokens": 24, "completion_tokens": 162, "total_tokens": 186, "prompt_tokens_details": {"cached_tokens": 66, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 0, "output_tokens": 0, "input_tokens_details": null}
+
+=== stream_reasoning_effort_medium ===
+ERROR IndexError('list index out of range')
+
+=== stream_thinking_budget ===
+ERROR IndexError('list index out of range')

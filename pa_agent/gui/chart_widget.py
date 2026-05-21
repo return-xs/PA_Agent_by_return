@@ -17,6 +17,7 @@ from PyQt6.QtCore import QTimer
 from pa_agent.gui.widgets.candle_item import CandleItem
 from pa_agent.gui.widgets.overlay_lines import OverlayLines
 from pa_agent.gui.widgets.seq_label_item import SeqLabelItem
+from pa_agent.util.trade_metrics import is_long_direction
 
 if TYPE_CHECKING:
     from pa_agent.data.base import KlineFrame
@@ -52,6 +53,8 @@ class ChartWidget(pg.PlotWidget):
         self._seq_labels: list[SeqLabelItem] = []
         self._ema_line: pg.PlotDataItem | None = None
         self._overlay = OverlayLines()
+        self._pending_decision: dict | None = None
+        self._direction_items: list[pg.GraphicsItem] = []
 
         # 30 Hz redraw timer (task 14.5)
         self._timer = QTimer(self)
@@ -67,14 +70,13 @@ class ChartWidget(pg.PlotWidget):
         self._dirty = True
 
     def set_decision(self, decision: dict) -> None:
-        """Draw or clear entry/TP/SL lines based on the AI decision.
-
-        If ``order_type == "不下单"`` the overlay lines are cleared.
-        Otherwise entry, TP, and SL lines are drawn.
-        """
+        """Draw or clear entry/TP/SL lines and direction marker from the AI decision."""
+        self._pending_decision = decision
         order_type = decision.get("order_type", _NO_ORDER_TEXT)
         if order_type == _NO_ORDER_TEXT:
             self._overlay.clear_lines(self)
+            self._clear_direction_marker()
+            self._pending_decision = None
             return
 
         entry = decision.get("entry_price")
@@ -86,10 +88,16 @@ class ChartWidget(pg.PlotWidget):
                 self._overlay.set_lines(self, float(entry), float(tp), float(sl))
             except (TypeError, ValueError):
                 self._overlay.clear_lines(self)
+        else:
+            self._overlay.clear_lines(self)
+
+        self._update_direction_marker()
 
     def reset(self) -> None:
         """Clear all chart items (candles, labels, EMA, overlay lines)."""
         self._overlay.clear_lines(self)
+        self._clear_direction_marker()
+        self._pending_decision = None
         self._clear_candles_and_labels()
         if self._ema_line is not None:
             self.removeItem(self._ema_line)
@@ -154,6 +162,61 @@ class ChartWidget(pg.PlotWidget):
                 pen=pg.mkPen(color=_EMA_COLOR, width=1),
             )
             self.addItem(self._ema_line)
+
+        self._update_direction_marker()
+
+    def _clear_direction_marker(self) -> None:
+        for item in self._direction_items:
+            self.removeItem(item)
+        self._direction_items.clear()
+
+    def _update_direction_marker(self) -> None:
+        """Draw ▲/▼ at newest bar × entry price for long/short."""
+        self._clear_direction_marker()
+        decision = self._pending_decision
+        frame = self._latest_frame
+        if decision is None or frame is None:
+            return
+        if decision.get("order_type", _NO_ORDER_TEXT) == _NO_ORDER_TEXT:
+            return
+
+        entry = decision.get("entry_price")
+        if entry is None:
+            return
+        try:
+            entry_f = float(entry)
+        except (TypeError, ValueError):
+            return
+
+        n = len(frame.bars)
+        if n == 0:
+            return
+
+        long = is_long_direction(decision.get("order_direction"))
+        if long is True:
+            symbol, color = "▲", (63, 185, 80)
+            anchor = (0.5, 1.0)
+        elif long is False:
+            symbol, color = "▼", (248, 81, 73)
+            anchor = (0.5, 0.0)
+        else:
+            return
+
+        x_pos = float(n - 1)
+        marker = pg.TextItem(
+            text=symbol,
+            color=color,
+            anchor=anchor,
+        )
+        from PyQt6.QtGui import QFont
+
+        font = QFont()
+        font.setPointSize(14)
+        font.setBold(True)
+        marker.setFont(font)
+        marker.setPos(x_pos, entry_f)
+        self.addItem(marker)
+        self._direction_items.append(marker)
 
     def _clear_candles_and_labels(self) -> None:
         """Remove all candle and label items from the plot."""

@@ -1,4 +1,4 @@
-"""Live AI stream panel: token-by-token reasoning display only."""
+"""Live AI stream panel: reasoning stream, or content stream when API has no reasoning."""
 from __future__ import annotations
 
 import logging
@@ -65,7 +65,7 @@ class _ChatWorker(QThread):
 
 
 class AIStreamPanel(QWidget):
-    """Live stream viewer: reasoning only, context usage, follow-up input."""
+    """Live stream viewer: reasoning when present, else streamed answer text."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -78,8 +78,12 @@ class AIStreamPanel(QWidget):
 
         self._stage: str = ""
         self._reasoning_chars = 0
+        self._content_chars = 0
         self._stage_t0 = 0.0
         self._finalized_stages: set[str] = set()
+        # Per-stage streamed char counts; text in the pane is never cleared between stages.
+        self._stage_chars: dict[str, dict[str, int]] = {}
+        self._stage_headers_written: set[str] = set()
 
         self._setup_ui()
 
@@ -157,22 +161,95 @@ class AIStreamPanel(QWidget):
             self._mode_label.setText("")
             return
         p = self._settings.provider
-        thinking = "enabled" if p.thinking else "disabled"
-        self._mode_label.setText(
-            f"API: thinking={thinking} · reasoning_effort={p.reasoning_effort} · {p.model}"
-        )
+        base = (p.base_url or "").lower()
+        if "deepseek.com" in base:
+            thinking = "enabled" if p.thinking else "disabled"
+            self._mode_label.setText(
+                f"API: thinking={thinking} · reasoning_effort={p.reasoning_effort} · {p.model}"
+            )
+        elif "kkone.vip" in base:
+            thinking = "开" if p.thinking else "关"
+            self._mode_label.setText(
+                f"KKAI: 思考={thinking} · budget≈"
+                f"{p.reasoning_effort if p.thinking else '—'} · {p.model} "
+                f"(部分线路不回传 reasoning_content)"
+            )
+        elif "yunwu.ai" in base:
+            thinking = "开" if p.thinking else "关"
+            self._mode_label.setText(
+                f"云雾: 思考={thinking} · effort="
+                f"{p.reasoning_effort if p.thinking else '—'} · {p.model}"
+            )
+        elif "packyapi.com" in base:
+            thinking = "开" if p.thinking else "关"
+            self._mode_label.setText(
+                f"PackyAPI: 思考={thinking} · effort="
+                f"{p.reasoning_effort if p.thinking else '—'} · {p.model}"
+            )
+        else:
+            self._mode_label.setText(
+                f"API: {p.model} · 思考={('开' if p.thinking else '关')}"
+            )
 
     def _update_stats(self) -> None:
-        self._stats_label.setText(f"思考 {self._reasoning_chars:,} 字")
+        labels = {"stage1": "阶段一", "stage2": "阶段二", "chat": "追问"}
+        parts: list[str] = []
+        for sid, label in labels.items():
+            counts = self._stage_chars.get(sid)
+            if not counts:
+                continue
+            total = counts.get("reasoning", 0) + counts.get("content", 0)
+            if total:
+                parts.append(f"{label} {total:,}字")
+        if parts:
+            self._stats_label.setText(" · ".join(parts))
+        else:
+            self._stats_label.setText("思考 0 字")
 
-    def _append_reasoning(self, chunk: str) -> None:
+    def _stream_phase_suffix(self) -> str:
+        counts = self._stage_chars.get(self._stage, {})
+        if counts.get("reasoning", 0) > 0:
+            return "思考中…"
+        if counts.get("content", 0) > 0:
+            return "生成中…"
+        return "等待响应…"
+
+    def _ensure_stage_header(self, stage: str) -> None:
+        if stage in self._stage_headers_written:
+            return
+        self._stage_headers_written.add(stage)
+        if stage in ("stage1", "stage2"):
+            title = self._stage_title(stage)
+        else:
+            title = "追问"
+        prefix = ""
+        if self._reasoning_edit.toPlainText():
+            prefix = "\n" + "─" * 48 + "\n"
+        self._reasoning_edit.appendPlainText(f"{prefix}【{title}】\n")
+
+    def _append_stream_text_for_stage(self, stage: str, chunk: str, *, kind: str) -> None:
         if not chunk:
             return
-        self._reasoning_chars += len(chunk)
+        self._ensure_stage_header(stage)
+        counts = self._stage_chars.setdefault(stage, {"reasoning": 0, "content": 0})
+        key = "reasoning" if kind == "reasoning" else "content"
+        counts[key] += len(chunk)
+        if stage == self._stage:
+            if kind == "reasoning":
+                self._reasoning_chars += len(chunk)
+            else:
+                self._content_chars += len(chunk)
         self._reasoning_edit.moveCursor(QTextCursor.MoveOperation.End)
         self._reasoning_edit.insertPlainText(chunk)
         self._reasoning_edit.moveCursor(QTextCursor.MoveOperation.End)
         self._update_stats()
+        if stage == self._stage:
+            title = self._stage_title(self._stage) if self._stage in ("stage1", "stage2") else "追问"
+            self._phase_label.setText(f"▶ {title} — {self._stream_phase_suffix()}")
+
+    def _append_reasoning(self, chunk: str) -> None:
+        stage = self._stage or "chat"
+        self._append_stream_text_for_stage(stage, chunk, kind="reasoning")
 
     def _append_user_message(self, text: str) -> None:
         """Append follow-up user text in red in the reasoning pane."""
@@ -201,23 +278,33 @@ class AIStreamPanel(QWidget):
         self._stage = stage
         self._stage_t0 = time.monotonic()
         self._reasoning_chars = 0
-        sep = "\n" + "─" * 48 + "\n"
-        if self._reasoning_edit.toPlainText():
-            self._reasoning_edit.appendPlainText(sep)
-        self._phase_label.setText(f"▶ {title} — 思考中…")
+        self._content_chars = 0
+        self._ensure_stage_header(stage)
+        self._phase_label.setText(f"▶ {title} — {self._stream_phase_suffix()}")
         self._update_stats()
 
-    def _end_stage(self, title: str) -> None:
+    def _end_stage(self, title: str, *, stage: str | None = None) -> None:
         elapsed = time.monotonic() - self._stage_t0
-        self._phase_label.setText(
-            f"✓ {title} — 完成 ({elapsed:.1f}s) · 思考 {self._reasoning_chars:,} 字"
-        )
+        stage_key = stage or self._stage
+        counts = self._stage_chars.get(stage_key, {})
+        reasoning_n = counts.get("reasoning", 0)
+        content_n = counts.get("content", 0)
+        if reasoning_n > 0:
+            detail = f"思考 {reasoning_n:,} 字"
+        elif content_n > 0:
+            detail = f"输出 {content_n:,} 字"
+        else:
+            detail = "无流式文本"
+        self._phase_label.setText(f"✓ {title} — 完成 ({elapsed:.1f}s) · {detail}")
 
     def clear(self) -> None:
         self._reasoning_edit.clear()
         self._reasoning_chars = 0
+        self._content_chars = 0
         self._stage = ""
         self._finalized_stages.clear()
+        self._stage_chars.clear()
+        self._stage_headers_written.clear()
         self._phase_label.setText("等待分析…")
         self._update_stats()
         self._progress_bar.setValue(0)
@@ -280,7 +367,9 @@ class AIStreamPanel(QWidget):
 
     def on_analysis_progress(self, text: str) -> None:
         """Sync phase header with orchestrator progress events."""
-        if text in ("阶段一完成", "阶段一失败"):
+        if text == "阶段二分析中…":
+            self._begin_stage("stage2", self._stage_title("stage2"))
+        elif text in ("阶段一完成", "阶段一失败"):
             self.finalize_stage("stage1")
         elif text in ("阶段二完成", "阶段二失败"):
             self.finalize_stage("stage2")
@@ -288,24 +377,30 @@ class AIStreamPanel(QWidget):
             self.finalize_stage(self._stage)
 
     def on_reasoning_token(self, stage: str, chunk: str) -> None:
-        if stage != self._stage:
-            return
-        self._append_reasoning(chunk)
+        self._append_stream_text_for_stage(stage, chunk, kind="reasoning")
 
     def on_content_token(self, stage: str, chunk: str) -> None:
-        del stage, chunk  # 实时页仅展示思考过程，不显示正式回答
+        """Show answer stream when the API does not emit reasoning_content (e.g. Claude on KKAI)."""
+        if not chunk:
+            return
+        counts = self._stage_chars.get(stage, {})
+        if counts.get("reasoning", 0) > 0:
+            return
+        self._append_stream_text_for_stage(stage, chunk, kind="content")
 
     def finalize_stage(self, stage: str) -> None:
         if stage in self._finalized_stages:
             return
         self._finalized_stages.add(stage)
-        self._end_stage(self._stage_title(stage))
+        self._end_stage(self._stage_title(stage), stage=stage)
 
     def show_stage_result(self, stage: str, content: str, reasoning: str) -> None:
-        del content  # 正式回答在「决策」/「原始」页查看
         stage_id = "stage1" if "一" in stage else "stage2"
-        if reasoning and stage_id == self._stage and self._reasoning_chars == 0:
-            self._append_reasoning(reasoning)
+        counts = self._stage_chars.get(stage_id, {})
+        if reasoning and counts.get("reasoning", 0) == 0:
+            self._append_stream_text_for_stage(stage_id, reasoning, kind="reasoning")
+        if content and counts.get("content", 0) == 0:
+            self._append_stream_text_for_stage(stage_id, content, kind="content")
         if stage_id not in self._finalized_stages:
             self.finalize_stage(stage_id)
 

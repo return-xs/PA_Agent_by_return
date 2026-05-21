@@ -43,7 +43,6 @@ def _node_sort_key(node_id: str) -> tuple[int, str]:
         ("10.1", 101),
         ("10.2", 102),
         ("10.3", 103),
-        ("10.4", 104),
         ("11.", 110),
         ("12.", 120),
         ("13.", 130),
@@ -390,6 +389,8 @@ def build_stage2_gate_wait_response(stage1_json: dict[str, Any]) -> dict[str, An
             ),
             "trade_confidence": 0,
             "trade_confidence_reasoning": "闸门未通过，不执行交易决策。",
+            "estimated_win_rate": None,
+            "estimated_win_rate_reasoning": "未进入 §10.3，无交易胜率估计。",
             "key_factors": list(key_signals)[:5],
             "watch_points": ["等待结构明朗或闸门节点转为可继续"],
             "risk_assessment": stage1_json.get("risk_warning") or "闸门等待",
@@ -489,8 +490,8 @@ def validate_stage2_trace_consistency(stage2: dict[str, Any]) -> list[str]:
             "decision_trace must not include 0.3; use 10.3 after stop/target are set"
         )
 
-    # §10 子节点顺序：10.1 → 10.2 → 10.3 → 10.4
-    for a, b in (("10.1", "10.2"), ("10.2", "10.3"), ("10.3", "10.4")):
+    # §10 子节点顺序：10.1 → 10.2 → 10.3
+    for a, b in (("10.1", "10.2"), ("10.2", "10.3")):
         ia, ib = _index_of(node_ids, a), _index_of(node_ids, b)
         if ia >= 0 and ib >= 0 and ia > ib:
             errors.append(f"decision_trace order: {a} must appear before {b}")
@@ -518,7 +519,7 @@ def validate_stage2_trace_consistency(stage2: dict[str, Any]) -> list[str]:
 
     if order_type == "不下单" and outcome in ("wait", "reject"):
         term_nid = str(terminal.get("node_id", ""))
-        if idx_103 >= 0 and term_nid not in ("10.3", "10.2", "10.1", "10.4", "9.5", "9.2"):
+        if idx_103 >= 0 and term_nid not in ("10.3", "10.2", "10.1", "9.5", "9.2"):
             pass  # allow other legitimate early stops
         if idx_103 >= 0 and trace[idx_103].get("answer") == "否" and term_nid != "10.3":
             errors.append(

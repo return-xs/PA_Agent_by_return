@@ -14,7 +14,7 @@ from pa_agent.util.threading import CancelToken, OrchestratorEvent
 from .conftest import VALID_STAGE1, VALID_STAGE2, make_reply
 
 
-def test_happy_path(frame, exc_counter, pending_writer, assembler, exp_reader):
+def test_happy_path(frame, pending_writer, assembler, exp_reader):
     """Both stages return valid JSON → full record saved, counter stays at 0."""
     client = MagicMock()
     client.stream_chat.side_effect = [
@@ -28,7 +28,6 @@ def test_happy_path(frame, exc_counter, pending_writer, assembler, exp_reader):
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -50,9 +49,6 @@ def test_happy_path(frame, exc_counter, pending_writer, assembler, exp_reader):
         OrchestratorEvent.Stage2Done,
         OrchestratorEvent.RecordSaved,
     ]
-
-    # Exception counter reset to 0 after success
-    assert exc_counter.consecutive_count == 0
 
     # Record has both stages populated
     assert record.stage1_diagnosis is not None

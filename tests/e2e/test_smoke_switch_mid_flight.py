@@ -14,7 +14,6 @@ import pytest
 from pa_agent.data.base import KlineBar
 from pa_agent.data.kline_buffer import KlineBuffer
 from pa_agent.app_context import AppContext
-from pa_agent.orchestrator.exception_counter import ExceptionCounter
 from pa_agent.ai.json_validator import JsonValidator
 from pa_agent.ai.router import route_strategy_files
 
@@ -82,9 +81,6 @@ def _make_ctx_slow_stage2(tmp_path):
     mock_assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
     mock_assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
 
-    exc_counter = ExceptionCounter(state_path=tmp_path / "exc.json")
-    exc_counter.load()
-
     pending_writer = MagicMock()
 
     ctx = AppContext()
@@ -93,12 +89,11 @@ def _make_ctx_slow_stage2(tmp_path):
     ctx.assembler = mock_assembler
     ctx.router = route_strategy_files
     ctx.validator = JsonValidator()
-    ctx.exc_counter = exc_counter
     ctx.pending_writer = pending_writer
     ctx.exp_reader = MagicMock()
     ctx.exp_reader.read_top5.return_value = []
 
-    return ctx, pending_writer, exc_counter, stage2_started
+    return ctx, pending_writer, stage2_started
 
 
 @pytest.mark.e2e
@@ -106,16 +101,13 @@ def test_switch_mid_flight_cancels_worker(qtbot, tmp_path):
     """Switching symbol while stage2 is running cancels the worker."""
     from pa_agent.gui.main_window import MainWindow
 
-    ctx, pending_writer, exc_counter, stage2_started = _make_ctx_slow_stage2(tmp_path)
+    ctx, pending_writer, stage2_started = _make_ctx_slow_stage2(tmp_path)
 
     window = MainWindow(ctx)
     qtbot.addWidget(window)
     window.show()
 
     window._bar_count_spin.setValue(5)
-
-    # Record initial consecutive count
-    initial_count = exc_counter.consecutive_count
 
     # Start analysis
     window._on_submit_analysis()
@@ -132,9 +124,6 @@ def test_switch_mid_flight_cancels_worker(qtbot, tmp_path):
     # (the slow_chat loop checks cancel_token every 50 ms)
     finished = worker.wait(6_000)  # 6 s timeout
     assert finished, "Worker did not finish after symbol switch"
-
-    # consecutive_count should be unchanged (cancel is not a validation error)
-    assert exc_counter.consecutive_count == initial_count
 
     # Tab2 input should be disabled after a symbol switch
     chat_tab = window._tabs.widget(1)

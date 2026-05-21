@@ -56,8 +56,8 @@ class FreeChatSession:
     client:
         DeepSeekClient instance for API calls.
     assembler:
-        PromptAssembler (kept for future use; system prompt is taken
-        directly from base_record.stage2_messages[0]).
+        PromptAssembler kept for future use. Follow-up chat builds its own
+        advisory prompt instead of reusing the Stage 2 decision contract.
     pending_writer:
         PendingWriter for appending FollowupTurn entries to the JSONL
         sidecar file.
@@ -129,13 +129,9 @@ class FreeChatSession:
         Steps
         -----
         1. Build ``history_for_api`` from:
-           - Stage-2 system prompt (from ``base_record.stage2_messages[0]``)
-           - Stage-2 user message (``base_record.stage2_messages[-1]``)
-           - Stage-2 assistant response (from ``base_record.stage2_response``,
-             with ``reasoning_content`` stripped unless
-             ``keep_reasoning_in_resend`` is True)
-           - All previous free-chat turns (user + assistant, same stripping
-             rule)
+           - A follow-up advisory system prompt.
+           - A compact reference summary of the completed analysis.
+           - All previous free-chat turns.
            - New user message
         2. Call ``client.chat(history_for_api, cancel_token=cancel_token)``.
         3. Append to ``_history_full`` (with ``reasoning_content`` preserved).
@@ -166,7 +162,7 @@ class FreeChatSession:
                     "2) 如果用户问的是【已有仓位管理】（止损/止盈/减仓/持有/加仓）：\n"
                     "   - 只围绕持仓管理回答，不要重新跑完整下单决策。\n"
                     "   - 先给结论（可以/不建议/条件允许），再给依据（结构/关键位/信号），再给风险控制（最大亏损、触发条件）。\n"
-                    "3) 如果用户问题信息不足，最多问 1-2 个澄清点（例如仓位大小、入场价、账户风险上限）。\n"
+                    "3) 如果用户问题信息不足，最多问 1-2 个澄清点（例如仓位大小、入场价、止损距离）。\n"
                     "4) 不要编造数据；以“最新已收盘K线数据”为准。\n"
                 ),
             }

@@ -13,7 +13,6 @@ import pyqtgraph as pg
 from pa_agent.data.base import KlineBar
 from pa_agent.data.kline_buffer import KlineBuffer
 from pa_agent.app_context import AppContext
-from pa_agent.orchestrator.exception_counter import ExceptionCounter
 from pa_agent.ai.json_validator import JsonValidator
 from pa_agent.ai.router import route_strategy_files
 
@@ -61,9 +60,6 @@ def _make_ctx(tmp_path):
     mock_assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
     mock_assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
 
-    exc_counter = ExceptionCounter(state_path=tmp_path / "exc.json")
-    exc_counter.load()
-
     pending_writer = MagicMock()
 
     ctx = AppContext()
@@ -72,12 +68,11 @@ def _make_ctx(tmp_path):
     ctx.assembler = mock_assembler
     ctx.router = route_strategy_files
     ctx.validator = JsonValidator()
-    ctx.exc_counter = exc_counter
     ctx.pending_writer = pending_writer
     ctx.exp_reader = MagicMock()
     ctx.exp_reader.read_top5.return_value = []
 
-    return ctx, pending_writer, exc_counter
+    return ctx, pending_writer
 
 
 @pytest.mark.e2e
@@ -85,7 +80,7 @@ def test_no_order_shows_no_trade_conclusion(qtbot, tmp_path):
     """When stage2 returns 不下单, DecisionPanel shows that conclusion."""
     from pa_agent.gui.main_window import MainWindow
 
-    ctx, pending_writer, exc_counter = _make_ctx(tmp_path)
+    ctx, pending_writer = _make_ctx(tmp_path)
 
     window = MainWindow(ctx)
     qtbot.addWidget(window)

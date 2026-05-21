@@ -59,6 +59,7 @@ class _AnalysisWorker(QThread):
 
     finished = pyqtSignal(dict)
     record_ready = pyqtSignal(object)   # emits the full AnalysisRecord
+    error_occurred = pyqtSignal(str)    # unhandled worker/orchestrator failure
     status_update = pyqtSignal(str)
     reasoning_token = pyqtSignal(str, str)   # (stage, chunk)
     content_token = pyqtSignal(str, str)     # (stage, chunk)
@@ -70,12 +71,16 @@ class _AnalysisWorker(QThread):
         orchestrator: Any,
         frame: Any,
         cancel_token: Any,
+        previous_record: Any = None,
+        incremental_new_bar_count: int | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._orchestrator = orchestrator
         self._frame = frame
         self._cancel_token = cancel_token
+        self._previous_record = previous_record
+        self._incremental_new_bar_count = incremental_new_bar_count
 
     def run(self) -> None:
         from pa_agent.util.threading import OrchestratorEvent
@@ -124,12 +129,15 @@ class _AnalysisWorker(QThread):
                 on_stage2_content=on_stage2_content,
                 on_stage_prompt=on_stage_prompt,
                 on_stage2_files=on_stage2_files,
+                previous_record=self._previous_record,
+                incremental_new_bar_count=self._incremental_new_bar_count,
             )
             decision = record.stage2_decision or {}
         except Exception as exc:  # noqa: BLE001
             logger.error("Analysis worker error: %s", exc, exc_info=True)
             decision = {}
             record = None  # type: ignore[assignment]
+            self.error_occurred.emit(str(exc))
 
         if record is not None:
             self.record_ready.emit(record)
@@ -149,9 +157,11 @@ class MainWindow(QMainWindow):
         self._worker: _AnalysisWorker | None = None
         self._cancel_token: Any = None
         self._analysis_in_progress = False
+        self._last_analysis_had_error = False
         self._switching = False
         self._chart_refresh_paused = False
         self._pending_submit_after_close = False
+        self._pending_force_incremental = False
         self._wait_forming_ts: int | None = None
         self._pending_submit_symbol = ""
         self._pending_submit_timeframe = ""
@@ -172,7 +182,6 @@ class MainWindow(QMainWindow):
         self._connect_event_bus()
         self._start_refresh_loop()
         self._update_ai_mode_label()
-        self._debug_widget.streak_reset.connect(self._on_exception_streak_reset)
         self._sync_submit_button_state()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -181,14 +190,12 @@ class MainWindow(QMainWindow):
         from pa_agent.gui.ai_sidebar import AISidebar
 
         _api_key = ""
-        _exc_counter = getattr(self._ctx, "exc_counter", None)
         _settings = getattr(self._ctx, "settings", None)
         if _settings is not None:
             _api_key = getattr(_settings.provider, "api_key", "") or ""
 
         self._ai_sidebar = AISidebar(
             api_key=_api_key,
-            exc_counter=_exc_counter,
             settings=_settings,
         )
         self._stream_panel = self._ai_sidebar.stream
@@ -260,6 +267,12 @@ class MainWindow(QMainWindow):
         self._symbol_combo.lineEdit().setPlaceholderText("输入品种名…")
         ctrl_layout.addWidget(self._symbol_combo)
 
+        self._symbol_alert_label = QLabel("")
+        self._symbol_alert_label.setStyleSheet("color: #f85149; font-size: 11px;")
+        self._symbol_alert_label.setWordWrap(True)
+        self._symbol_alert_label.hide()
+        ctrl_layout.addWidget(self._symbol_alert_label)
+
         # Timeframe
         ctrl_layout.addWidget(QLabel("周期:"))
         self._tf_combo = QComboBox()
@@ -296,6 +309,16 @@ class MainWindow(QMainWindow):
         self._submit_btn.setMinimumWidth(100)
         self._submit_btn.clicked.connect(self._on_submit_analysis)
         ctrl_layout.addWidget(self._submit_btn)
+
+        self._incremental_submit_btn = QPushButton("增量分析")
+        self._incremental_submit_btn.setMinimumWidth(100)
+        self._incremental_submit_btn.setToolTip(
+            "强制基于同品种/周期最近一条成功记录做增量分析，"
+            "不受「增量分析最大新增K线」阈值限制；"
+            "若无可用上一轮记录或 K 线无法对齐，将提示失败。"
+        )
+        self._incremental_submit_btn.clicked.connect(self._on_submit_incremental_analysis)
+        ctrl_layout.addWidget(self._incremental_submit_btn)
 
         self._demo_btn = QPushButton("演示模式")
         self._demo_btn.setToolTip("用 records/pending 中已保存的分析记录回放界面")
@@ -350,11 +373,7 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(workbench, stretch=1)
 
         # Connect symbol/timeframe combo boxes to the switch handler
-        self._symbol_combo.currentTextChanged.connect(
-            lambda _: self._on_symbol_or_tf_changed(
-                self._symbol_combo.currentText(), self._tf_combo.currentText()
-            )
-        )
+        self._symbol_combo.currentTextChanged.connect(self._on_symbol_combo_text_changed)
         self._tf_combo.currentTextChanged.connect(
             lambda _: self._on_symbol_or_tf_changed(
                 self._symbol_combo.currentText(), self._tf_combo.currentText()
@@ -411,12 +430,46 @@ class MainWindow(QMainWindow):
         logger.info("RefreshLoop started for %s %s",
                     getattr(data_source, "_symbol", "?"),
                     getattr(data_source, "_timeframe", "?"))
+        self._update_symbol_mt5_alert()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _on_symbol_combo_text_changed(self, _text: str = "") -> None:
+        """React to symbol edits and keep timeframe subscription in sync."""
+        self._update_symbol_mt5_alert()
+        self._on_symbol_or_tf_changed(
+            self._symbol_combo.currentText(),
+            self._tf_combo.currentText(),
+        )
+
+    def _update_symbol_mt5_alert(self) -> None:
+        """Show a red hint when the typed symbol is not available in MT5."""
+        label = getattr(self, "_symbol_alert_label", None)
+        if label is None:
+            return
+        symbol = self._symbol_combo.currentText().strip()
+        if not symbol:
+            label.hide()
+            return
+        data_source = getattr(self._ctx, "data_source", None)
+        checker = getattr(data_source, "is_symbol_available", None)
+        if not getattr(data_source, "_connected", False) or not callable(checker):
+            label.hide()
+            return
+        if checker(symbol):
+            label.hide()
+            return
+        label.setText(
+            "未在 MT5 获取到该品种，请检查当前输入是否与 MT5「市场报价」中的名称完全一致"
+            "（含后缀，如 XAUUSDm）。"
+        )
+        label.show()
 
     def _on_status_update(self, text: str) -> None:
         """Update the status bar with subscription / analysis / data-delay text."""
         self._status_bar.showMessage(text)
+        if text == "数据延迟":
+            self._update_symbol_mt5_alert()
         if self._analysis_in_progress:
             panel = getattr(self, "_stream_panel", None)
             if panel is not None:
@@ -520,7 +573,12 @@ class MainWindow(QMainWindow):
             return
 
         if not bars:
+            self._update_symbol_mt5_alert()
             return
+
+        alert = getattr(self, "_symbol_alert_label", None)
+        if alert is not None:
+            alert.hide()
 
         try:
             import time as _time
@@ -620,6 +678,7 @@ class MainWindow(QMainWindow):
 
             self._status_bar.showMessage(f"已切换至 {new_symbol} {new_tf}")
             logger.info("Symbol/TF switched to %s %s", new_symbol, new_tf)
+            self._update_symbol_mt5_alert()
 
             # Persist last-used symbol/timeframe to settings
             settings = getattr(self._ctx, "settings", None)
@@ -710,6 +769,7 @@ class MainWindow(QMainWindow):
     def _clear_pending_bar_close_wait(self) -> None:
         """Cancel wait-for-bar-close armed by the checkbox."""
         self._pending_submit_after_close = False
+        self._pending_force_incremental = False
         self._wait_forming_ts = None
         self._pending_submit_symbol = ""
         self._pending_submit_timeframe = ""
@@ -730,10 +790,26 @@ class MainWindow(QMainWindow):
         timeframe = self._pending_submit_timeframe
         bar_count = self._pending_submit_bar_count
         self._clear_pending_bar_close_wait()
-        self._status_bar.showMessage("最新K线已收盘，正在提交分析…")
-        self._start_analysis(symbol, timeframe, bar_count)
+        if self._pending_force_incremental:
+            self._status_bar.showMessage("最新K线已收盘，正在提交增量分析…")
+        else:
+            self._status_bar.showMessage("最新K线已收盘，正在提交分析…")
+        self._start_analysis(
+            symbol,
+            timeframe,
+            bar_count,
+            force_incremental=self._pending_force_incremental,
+            snapshot_bars=bars,
+        )
 
-    def _arm_wait_for_bar_close(self, symbol: str, timeframe: str, bar_count: int) -> bool:
+    def _arm_wait_for_bar_close(
+        self,
+        symbol: str,
+        timeframe: str,
+        bar_count: int,
+        *,
+        force_incremental: bool = False,
+    ) -> bool:
         """Wait until bars[0] ts_open changes, then call _start_analysis."""
         from datetime import datetime
 
@@ -761,6 +837,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._pending_submit_after_close = True
+        self._pending_force_incremental = force_incremental
         self._wait_forming_ts = forming_ts
         self._last_forming_ts_open = forming_ts
         self._pending_submit_symbol = symbol.strip()
@@ -776,13 +853,14 @@ class MainWindow(QMainWindow):
         except (OSError, OverflowError, ValueError):
             ts_hint = f"ts={forming_ts}"
 
+        submit_hint = "提交增量分析" if force_incremental else "提交分析"
         if secs is not None:
             self._status_bar.showMessage(
-                f"等待当前K线收盘…还剩 {secs} 秒（{ts_hint}，收盘后将自动提交）"
+                f"等待当前K线收盘…还剩 {secs} 秒（{ts_hint}，收盘后将自动{submit_hint}）"
             )
         else:
             self._status_bar.showMessage(
-                f"等待当前K线收盘…（{ts_hint}，收盘后将自动提交分析）"
+                f"等待当前K线收盘…（{ts_hint}，收盘后将自动{submit_hint}）"
             )
         return True
 
@@ -990,6 +1068,7 @@ class MainWindow(QMainWindow):
         self._demo_replayer.record_ready.connect(self._on_record_ready)
         self._demo_replayer.stage_prompt_ready.connect(panel.on_stage_prompt_ready)
         self._demo_replayer.reasoning_token.connect(panel.on_reasoning_token)
+        self._demo_replayer.content_token.connect(panel.on_content_token)
         self._demo_replayer.stage2_files_ready.connect(self._on_stage2_files_ready)
         self._demo_replayer.replay_finished.connect(self._on_demo_replay_done)
         self._demo_replayer.start()
@@ -1069,6 +1148,14 @@ class MainWindow(QMainWindow):
 
     def _on_submit_analysis(self) -> None:
         """Handle the '提交分析' button click."""
+        self._begin_submit_analysis(force_incremental=False)
+
+    def _on_submit_incremental_analysis(self) -> None:
+        """Handle the '增量分析' button click — always try incremental mode."""
+        self._begin_submit_analysis(force_incremental=True)
+
+    def _begin_submit_analysis(self, *, force_incremental: bool) -> None:
+        """Shared entry for normal and forced-incremental submit buttons."""
         if not self._can_submit():
             return
 
@@ -1084,15 +1171,33 @@ class MainWindow(QMainWindow):
         bar_count = self._bar_count_spin.value()
 
         if self._wait_close_checkbox.isChecked():
-            if not self._arm_wait_for_bar_close(symbol, timeframe, bar_count):
+            if not self._arm_wait_for_bar_close(
+                symbol,
+                timeframe,
+                bar_count,
+                force_incremental=force_incremental,
+            ):
                 return
             return
 
-        self._start_analysis(symbol, timeframe, bar_count)
+        self._start_analysis(
+            symbol,
+            timeframe,
+            bar_count,
+            force_incremental=force_incremental,
+        )
 
-    def _start_analysis(self, symbol: str, timeframe: str, bar_count: int) -> None:
+    def _start_analysis(
+        self,
+        symbol: str,
+        timeframe: str,
+        bar_count: int,
+        *,
+        force_incremental: bool = False,
+        snapshot_bars: Any = None,
+    ) -> None:
         """Build snapshot and run two-stage analysis (after optional bar-close wait)."""
-        frame = self._take_snapshot(symbol, timeframe, bar_count)
+        frame = self._take_snapshot(symbol, timeframe, bar_count, bars_raw=snapshot_bars)
         if frame is None:
             self._status_bar.showMessage("数据不足，请等待缓冲区填满后再提交")
             return
@@ -1100,6 +1205,20 @@ class MainWindow(QMainWindow):
         orchestrator = self._build_orchestrator()
         if orchestrator is None:
             self._status_bar.showMessage("编排器未就绪，请检查设置")
+            return
+
+        previous_record, incremental_new_bar_count, incremental_detail = (
+            self._find_incremental_base_record(
+                frame,
+                symbol,
+                timeframe,
+                force_incremental=force_incremental,
+            )
+        )
+        if force_incremental and previous_record is None:
+            reason = self._incremental_unavailable_reason(frame, symbol, timeframe)
+            self._status_bar.showMessage(reason)
+            QMessageBox.warning(self, "无法增量分析", reason)
             return
 
         # Create cancel token
@@ -1112,10 +1231,13 @@ class MainWindow(QMainWindow):
             orchestrator=orchestrator,
             frame=frame,
             cancel_token=self._cancel_token,
+            previous_record=previous_record,
+            incremental_new_bar_count=incremental_new_bar_count,
             parent=None,
         )
         self._worker.finished.connect(self._on_analysis_finished)
         self._worker.record_ready.connect(self._on_record_ready)
+        self._worker.error_occurred.connect(self._on_analysis_error)
         self._worker.status_update.connect(self._on_status_update)
         self._worker.finished.connect(lambda _: self._on_worker_done())
 
@@ -1131,10 +1253,29 @@ class MainWindow(QMainWindow):
         self._set_chart_refresh_paused(True)
 
         self._analysis_in_progress = True
+        self._last_analysis_had_error = False
         self._update_submit_button_state()
-        self._status_bar.showMessage(
-            "分析中…（图表已冻结，K1=最新已收盘K线，与提交给 AI 的数据一致）"
-        )
+        from pa_agent.ai.decision_stance import stance_label_zh
+
+        stance_raw = "conservative"
+        settings = getattr(self._ctx, "settings", None)
+        if settings is not None:
+            stance_raw = getattr(settings.general, "decision_stance", "conservative")
+        stance_label = stance_label_zh(stance_raw)
+        if incremental_new_bar_count is not None:
+            prefix = "强制增量分析中" if force_incremental else "增量分析中"
+            if incremental_new_bar_count > 0:
+                detail = incremental_detail or f"新增{incremental_new_bar_count}根已收盘K线"
+            else:
+                detail = "无新增K线，基于上一轮结论复核"
+            self._status_bar.showMessage(
+                f"{prefix}…（倾向:{stance_label}，{detail}，图表已冻结）"
+            )
+            logger.info("Incremental submit: %s", detail)
+        else:
+            self._status_bar.showMessage(
+                f"分析中…（倾向:{stance_label}，图表已冻结，K1=最新已收盘K线）"
+            )
         self._decision_badge.setText("分析中…")
         self._ai_sidebar.focus_stream()
 
@@ -1166,6 +1307,96 @@ class MainWindow(QMainWindow):
             Qt.ConnectionType.UniqueConnection,
         )
         self._worker.start()
+
+    def _find_incremental_base_record(
+        self,
+        frame: Any,
+        symbol: str,
+        timeframe: str,
+        *,
+        force_incremental: bool = False,
+    ) -> tuple[Any | None, int | None, str | None]:
+        """Return a prior record for incremental analysis when configured."""
+        settings = getattr(self._ctx, "settings", None)
+        threshold = int(
+            getattr(getattr(settings, "general", None), "incremental_max_new_bars", 10)
+        )
+        if not force_incremental and threshold <= 0:
+            return None, None, None
+
+        try:
+            from pa_agent.records.analysis_history import (
+                compute_incremental_bar_delta,
+                find_latest_successful_record,
+                format_bar_ts,
+            )
+
+            previous = find_latest_successful_record(symbol=symbol, timeframe=timeframe)
+            if previous is None:
+                return None, None, None
+
+            delta = compute_incremental_bar_delta(frame, previous)
+            if delta is None:
+                logger.info("Incremental analysis skipped: no overlapping prior bar")
+                return None, None, None
+
+            new_count = delta.new_count
+            if not force_incremental and new_count > threshold:
+                logger.info(
+                    "Incremental analysis skipped: %d new bars exceeds threshold %d",
+                    new_count,
+                    threshold,
+                )
+                return None, None, None
+
+            anchor_label = format_bar_ts(delta.anchor_ts_open)
+            if new_count == 0:
+                detail = f"锚定K线 {anchor_label}，无新增已收盘K线"
+            elif new_count == 1:
+                detail = (
+                    f"锚定K线 {anchor_label}，新增1根 {format_bar_ts(delta.new_bar_ts_opens[0])}"
+                )
+            else:
+                newest = format_bar_ts(delta.new_bar_ts_opens[0])
+                oldest_new = format_bar_ts(delta.new_bar_ts_opens[-1])
+                detail = (
+                    f"锚定K线 {anchor_label}，新增{new_count}根（{oldest_new} → {newest}）"
+                )
+
+            mode = "forced" if force_incremental else "auto"
+            logger.info("Incremental analysis enabled (%s): %s", mode, detail)
+            return previous, new_count, detail
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Incremental base lookup failed: %s", exc)
+            return None, None, None
+
+    def _incremental_unavailable_reason(
+        self,
+        frame: Any,
+        symbol: str,
+        timeframe: str,
+    ) -> str:
+        """Explain why forced incremental analysis cannot start."""
+        try:
+            from pa_agent.records.analysis_history import (
+                compute_incremental_bar_delta,
+                find_latest_successful_record,
+            )
+
+            previous = find_latest_successful_record(symbol=symbol, timeframe=timeframe)
+            if previous is None:
+                return (
+                    f"无法强制增量分析：未找到 {symbol} {timeframe} 的成功分析记录。"
+                    "请先完成一次完整分析。"
+                )
+            if compute_incremental_bar_delta(frame, previous) is None:
+                return (
+                    "无法强制增量分析：当前 K 线与上一轮记录无法对齐。"
+                    "可能缺口过大或 K 线数量/范围变化过大，请改用「提交分析」。"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Incremental unavailable reason lookup failed: %s", exc)
+        return "无法强制增量分析：未找到可用的上一轮记录。"
 
     def _on_stage2_files_ready(self, strategy_files: list) -> None:
         """Update 调试 tab when Stage 2 strategy .txt list is known."""
@@ -1204,9 +1435,47 @@ class MainWindow(QMainWindow):
                 self._decision_flow_viz_panel.clear()
             self._decision_badge.setText("")
 
+    def _prompt_debug_report_for_bug_fix(self, headline: str, detail: str = "") -> None:
+        """Switch to 原始 tab and ask the user to copy debug info for AI-assisted fixes."""
+        sidebar = getattr(self, "_ai_sidebar", None)
+        debug = getattr(self, "_debug_widget", None)
+        if sidebar is not None:
+            sidebar.focus_raw()
+        if debug is not None:
+            debug.focus_exception_turn()
+
+        body = (
+            f"{headline}\n\n"
+            "已切换到右侧「原始」页。\n"
+            "请查看页面最下方的「Validation / Exception」与「Raw Response」，"
+            "或点击「复制调试信息」，将完整内容粘贴给 AI，便于排查并修复问题。"
+        )
+        if detail:
+            body += f"\n\n摘要：{detail}"
+        QMessageBox.warning(self, "需要排查错误", body)
+
+    def _on_analysis_error(self, message: str) -> None:
+        """Unhandled exception in the analysis worker thread."""
+        self._last_analysis_had_error = True
+        debug = getattr(self, "_debug_widget", None)
+        if debug is not None:
+            debug.add_turn({
+                "label": "⚠ 程序异常",
+                "system_prompt": "",
+                "user_prompt": "",
+                "raw_response": {},
+                "validation_info": message,
+            })
+        self._prompt_debug_report_for_bug_fix("分析过程发生程序异常", message)
+
     def _on_record_ready(self, record: Any) -> None:
         """Push the full AnalysisRecord to the conversation and debug tabs."""
         import json as _json
+
+        exc_info = getattr(record, "exception", None)
+        exc_json = (
+            _json.dumps(exc_info, ensure_ascii=False, indent=2) if exc_info else ""
+        )
 
         # ── Debug tab: add Stage1 and Stage2 turns ────────────────────────────
         debug = getattr(self, "_debug_widget", None)
@@ -1217,7 +1486,12 @@ class MainWindow(QMainWindow):
             s1_user = next((m.get("content", "") for m in s1_msgs if m.get("role") == "user"), "")
             s1_raw = getattr(record, "stage1_response", {}) or {}
             s1_diag = getattr(record, "stage1_diagnosis", None)
-            s1_validation = _json.dumps(s1_diag, ensure_ascii=False, indent=2) if s1_diag else "（验证失败或无数据）"
+            if exc_info and exc_info.get("stage") == "stage1":
+                s1_validation = exc_json
+            elif s1_diag:
+                s1_validation = _json.dumps(s1_diag, ensure_ascii=False, indent=2)
+            else:
+                s1_validation = "（验证失败或无数据）"
             debug.add_turn({
                 "label": "Stage1 诊断",
                 "system_prompt": s1_system,
@@ -1229,10 +1503,15 @@ class MainWindow(QMainWindow):
             # Stage 2 turn
             s2_msgs = getattr(record, "stage2_messages", []) or []
             s2_system = next((m.get("content", "") for m in s2_msgs if m.get("role") == "system"), "")
-            s2_user = next((m.get("content", "") for m in s2_msgs if m.get("role") == "user"), "")
+            s2_user = next((m.get("content", "") for m in reversed(s2_msgs) if m.get("role") == "user"), "")
             s2_raw = getattr(record, "stage2_response", {}) or {}
             s2_decision = getattr(record, "stage2_decision", None)
-            s2_validation = _json.dumps(s2_decision, ensure_ascii=False, indent=2) if s2_decision else "（验证失败或无数据）"
+            if exc_info and exc_info.get("stage") == "stage2":
+                s2_validation = exc_json
+            elif s2_decision:
+                s2_validation = _json.dumps(s2_decision, ensure_ascii=False, indent=2)
+            else:
+                s2_validation = "（验证失败或无数据）"
             debug.add_turn({
                 "label": "Stage2 决策",
                 "system_prompt": s2_system,
@@ -1241,16 +1520,22 @@ class MainWindow(QMainWindow):
                 "validation_info": s2_validation,
             })
 
-            # Exception info if any
-            exc_info = getattr(record, "exception", None)
             if exc_info:
                 debug.add_turn({
                     "label": "⚠ 异常",
                     "system_prompt": "",
                     "user_prompt": "",
                     "raw_response": {},
-                    "validation_info": _json.dumps(exc_info, ensure_ascii=False, indent=2),
+                    "validation_info": exc_json,
                 })
+                self._last_analysis_had_error = True
+                err_type = exc_info.get("type", "error")
+                category = exc_info.get("category", "")
+                msg = exc_info.get("message", "")
+                detail = f"{category}: {msg}" if category else (msg or err_type)
+                self._prompt_debug_report_for_bug_fix(f"分析未通过（{err_type}）", detail)
+            else:
+                self._last_analysis_had_error = False
 
         pf = getattr(self, "_prompt_files_panel", None)
         if pf is not None:
@@ -1441,7 +1726,10 @@ class MainWindow(QMainWindow):
         self._analysis_in_progress = False
         self._worker = None
         self._update_submit_button_state()
-        self._status_bar.showMessage("分析完成")
+        if self._last_analysis_had_error:
+            self._status_bar.showMessage("分析结束（存在错误，请查看「原始」页调试信息）")
+        else:
+            self._status_bar.showMessage("分析完成")
 
     def _open_settings_dialog(self) -> None:
         """Open the SettingsDialog; import lazily to avoid circular imports."""
@@ -1475,22 +1763,42 @@ class MainWindow(QMainWindow):
             self._ai_mode_label.setText("")
             return
         p = settings.provider
-        thinking = "开" if p.thinking else "关"
-        self._ai_mode_label.setText(
-            f"思考: {thinking} · effort={p.reasoning_effort} · {p.model}"
-        )
+        base = (p.base_url or "").lower()
+        if "deepseek.com" in base:
+            thinking = "开" if p.thinking else "关"
+            self._ai_mode_label.setText(
+                f"思考: {thinking} · effort={p.reasoning_effort} · {p.model}"
+            )
+        elif "kkone.vip" in base:
+            thinking = "开" if p.thinking else "关"
+            effort = p.reasoning_effort if p.thinking else "—"
+            self._ai_mode_label.setText(
+                f"KKAI 思考: {thinking} · budget≈{effort} · {p.model}"
+            )
+        elif "yunwu.ai" in base:
+            thinking = "开" if p.thinking else "关"
+            effort = p.reasoning_effort if p.thinking else "—"
+            mode = "adaptive" if "opus-4-7" in p.model or "opus-4-6" in p.model else "effort"
+            self._ai_mode_label.setText(
+                f"云雾 思考: {thinking} · {mode}={effort} · {p.model}"
+            )
+        elif "packyapi.com" in base:
+            thinking = "开" if p.thinking else "关"
+            effort = p.reasoning_effort if p.thinking else "—"
+            mode = "adaptive" if "opus-4-7" in p.model or "opus-4-6" in p.model else "effort"
+            self._ai_mode_label.setText(
+                f"PackyAPI 思考: {thinking} · {mode}={effort} · {p.model}"
+            )
+        else:
+            self._ai_mode_label.setText(
+                f"模型: {p.model} · 思考={('开' if p.thinking else '关')}"
+            )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _can_submit(self) -> bool:
         """Return True if the submit button should be enabled."""
         return self._submit_block_reason() is None
-
-    def _on_exception_streak_reset(self) -> None:
-        """Re-enable submit after user clears validation error streak (原始 tab)."""
-        self._sync_submit_button_state()
-        if getattr(self, "_status_bar", None) is not None:
-            self._status_bar.showMessage("连续异常计数已清除，可以重新提交分析")
 
     def _submit_block_reason(self) -> str | None:
         """Human-readable reason when submit is disabled, or None if allowed."""
@@ -1502,12 +1810,6 @@ class MainWindow(QMainWindow):
             return "等待最新K线收盘"
         if self._switching:
             return "正在切换品种/周期"
-        exc_count = self._get_consecutive_count()
-        if exc_count >= 2:
-            return (
-                f"连续 JSON 校验失败 {exc_count} 次（已达上限 2）。"
-                "请到「原始」页点击「清除连续异常计数」，或删除 config/exception_state.json 后重启"
-            )
         return None
 
     def _sync_submit_button_state(self) -> None:
@@ -1517,29 +1819,29 @@ class MainWindow(QMainWindow):
         reason = self._submit_block_reason()
         can = reason is None
         self._submit_btn.setEnabled(can)
+        if hasattr(self, "_incremental_submit_btn"):
+            self._incremental_submit_btn.setEnabled(can)
+            if can:
+                self._incremental_submit_btn.setToolTip(
+                    "强制基于同品种/周期最近一条成功记录做增量分析，"
+                    "不受「增量分析最大新增K线」阈值限制；"
+                    "若无可用上一轮记录或 K 线无法对齐，将提示失败。"
+                )
+            else:
+                self._incremental_submit_btn.setToolTip(reason or "")
         if can:
             self._submit_btn.setToolTip("")
         else:
             self._submit_btn.setToolTip(reason or "")
             status_bar = getattr(self, "_status_bar", None)
-            if status_bar is not None and reason and "连续 JSON" in reason:
+            if status_bar is not None and reason:
                 cur = status_bar.currentMessage() or ""
-                if cur in ("就绪", "") or "连续" in cur or "提交分析已锁定" in cur:
+                if cur in ("就绪", "") or "提交分析已锁定" in cur:
                     status_bar.showMessage(f"提交分析已锁定：{reason}")
 
     def _update_submit_button_state(self) -> None:
         """Enable or disable the submit button based on current state."""
         self._sync_submit_button_state()
-
-    def _get_consecutive_count(self) -> int:
-        """Return the current consecutive exception count (0 if unavailable)."""
-        try:
-            exc_counter = getattr(self._ctx, "exc_counter", None)
-            if exc_counter is not None:
-                return exc_counter.consecutive_count
-        except Exception:  # noqa: BLE001
-            pass
-        return 0
 
     def _build_chart_frame_from_bars(
         self,
@@ -1564,14 +1866,21 @@ class MainWindow(QMainWindow):
             return build_live_frame(bars_raw, n, symbol, timeframe)
         return build_display_frame(bars_raw, n, symbol, timeframe)
 
-    def _take_snapshot(self, symbol: str, timeframe: str, bar_count: int) -> Any:
+    def _take_snapshot(
+        self,
+        symbol: str,
+        timeframe: str,
+        bar_count: int,
+        *,
+        bars_raw: Any = None,
+    ) -> Any:
         """Snapshot for analysis: *bar_count* closed bars (newest forming bar excluded)."""
         try:
-            data_source = getattr(self._ctx, "data_source", None)
-            if data_source is None or not getattr(data_source, "_connected", False):
-                return None
-
-            bars_raw = data_source.latest_snapshot(bar_count + 5)
+            if bars_raw is None:
+                data_source = getattr(self._ctx, "data_source", None)
+                if data_source is None or not getattr(data_source, "_connected", False):
+                    return None
+                bars_raw = data_source.latest_snapshot(bar_count + 5)
             if not bars_raw:
                 return None
 
@@ -1614,14 +1923,13 @@ class MainWindow(QMainWindow):
             assembler = getattr(self._ctx, "assembler", None)
             router = getattr(self._ctx, "router", None)
             validator = getattr(self._ctx, "validator", None)
-            exc_counter = getattr(self._ctx, "exc_counter", None)
             pending_writer = getattr(self._ctx, "pending_writer", None)
             exp_reader = getattr(self._ctx, "exp_reader", None)
             settings = getattr(self._ctx, "settings", None)
 
             if any(
                 x is None
-                for x in [client, assembler, router, validator, exc_counter,
+                for x in [client, assembler, router, validator,
                            pending_writer, exp_reader]
             ):
                 return None
@@ -1631,7 +1939,6 @@ class MainWindow(QMainWindow):
                 assembler=assembler,
                 router=router,
                 validator=validator,
-                exc_counter=exc_counter,
                 pending_writer=pending_writer,
                 exp_reader=exp_reader,
                 settings=settings,

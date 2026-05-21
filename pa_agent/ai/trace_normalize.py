@@ -28,6 +28,8 @@ _NODE_ANSWER_BY_ID: dict[str, dict[str, tuple[str, str]]] = {
     "4.2": {
         "上涨": ("是", "bullish"),
         "下跌": ("是", "bearish"),
+        "上涨通道": ("是", "bullish"),
+        "下跌通道": ("是", "bearish"),
         "多头": ("是", "bullish"),
         "空头": ("是", "bearish"),
         "bullish": ("是", "bullish"),
@@ -92,6 +94,19 @@ _GENERIC_ANSWER: dict[str, str] = {
     "fail": "否",
     "yes": "是",
     "no": "否",
+    # Common AI synonyms outside the strict enum (map before schema validation).
+    "部分": "中性",
+    "部分一致": "中性",
+    "部分通过": "中性",
+    "部分符合": "中性",
+    "部分是": "中性",
+    "部分否": "否",
+    "待确认": "等待",
+    "待定": "等待",
+    "需确认": "等待",
+    "尚未确认": "等待",
+    "未确认": "等待",
+    "不确定": "中性",
 }
 
 _BAR_RANGE_ALIASES = frozenset({"全局", "全图", "整体", "全部", "all"})
@@ -217,6 +232,10 @@ def _resolve_trace_answer(
         return _GENERIC_ANSWER[ans], None
     if ans.lower() in _GENERIC_ANSWER:
         return _GENERIC_ANSWER[ans.lower()], None
+
+    # Qualified partial answers (e.g. 部分符合 / 部分是)
+    if ans.startswith("部分"):
+        return "中性", None
 
     return None
 

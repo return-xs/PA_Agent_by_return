@@ -41,6 +41,8 @@ NO_ORDER_WITH_PRICE = {
         "diagnosis_confidence_reasoning": "周期位置存在歧义",
         "trade_confidence": 30,
         "trade_confidence_reasoning": "缺乏明确入场信号",
+        "estimated_win_rate": None,
+        "estimated_win_rate_reasoning": "未下单",
         "key_factors": ["factor1"],
         "watch_points": ["watch1"],
         "risk_assessment": "high risk",
@@ -70,7 +72,7 @@ NO_ORDER_WITH_PRICE = {
 }
 
 
-def test_no_order_with_entry_price(frame, exc_counter, pending_writer, assembler, exp_reader):
+def test_no_order_with_entry_price(frame, pending_writer, assembler, exp_reader):
     """order_type='不下单' with entry_price=0 → category 'c', count == 1."""
     client = MagicMock()
     client.stream_chat.side_effect = [
@@ -84,7 +86,6 @@ def test_no_order_with_entry_price(frame, exc_counter, pending_writer, assembler
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -101,9 +102,6 @@ def test_no_order_with_entry_price(frame, exc_counter, pending_writer, assembler
     # Validation error category should be 'c' (invalid value / iron law violation)
     assert record.exception is not None
     assert record.exception["category"] == "c"
-
-    # consecutive_count incremented by 1
-    assert exc_counter.consecutive_count == 1
 
     # Stage2 started but failed
     assert OrchestratorEvent.Stage2Started in events

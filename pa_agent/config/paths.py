@@ -24,5 +24,4 @@ LOGS_DIR: Path = PROJECT_ROOT / "logs"
 
 # ── Individual file paths ─────────────────────────────────────────────────────
 SETTINGS_JSON_PATH: Path = CONFIG_DIR / "settings.json"
-EXCEPTION_STATE_JSON_PATH: Path = CONFIG_DIR / "exception_state.json"
 LOG_FILE_PATH: Path = LOGS_DIR / "pa_agent.log"

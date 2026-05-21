@@ -1,7 +1,10 @@
 """Pydantic settings models for PA Agent."""
 from __future__ import annotations
 from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
 
 
 class AIProviderSettings(BaseModel):
@@ -28,6 +31,9 @@ class GeneralSettings(BaseModel):
     last_timeframe: str = "1h"
     decision_flow_auto_play: bool = False
     decision_flow_play_seconds: int = 50
+    incremental_max_new_bars: int = Field(default=10, ge=0, le=500)
+    #: 阶段二交易倾向：conservative=当前默认；balanced/aggressive 逐级更愿意下单
+    decision_stance: DecisionStance = "conservative"
     #: 决策树可视化：在「整图适配」基础上的缩放百分比（100=与适配一致；可任意放大，仅下限 10%）
     decision_flow_default_zoom_pct: int = Field(default=500, ge=10)
 

@@ -8,14 +8,57 @@ import math
 from pathlib import Path
 from typing import Any
 
+from pa_agent.ai.decision_stance import build_decision_stance_guidance, normalize_stance
 from pa_agent.data.base import KlineFrame
+from pa_agent.records.schema import AnalysisRecord
 
 logger = logging.getLogger(__name__)
+
+# ── Language (both stages, thinking + final output) ───────────────────────────
+
+_LANGUAGE_ZH_RULE = """
+## 语言要求（阶段一、阶段二均必须遵守）
+
+- **思考过程**：扩展思考、内部推理、以及写入 JSON 的 `reason`、`diagnosis_confidence_reasoning`、`trade_confidence_reasoning`、`estimated_win_rate_reasoning` 等说明，**全程使用简体中文**。禁止用英文写推理段落或中英混杂的长句（常见缩写如 HH、HL、Spike、TR 可保留）。
+- **最终输出**：阶段一诊断 JSON、阶段二决策 JSON 中所有面向用户的字符串（含 `reasoning`、`key_factors`、`risk_assessment`、`watch_points`、`gate_trace`/`decision_trace` 的 `question` 与 `reason` 等）**一律使用简体中文**。
+- **仅允许英文或固定英文枚举**：JSON 字段名（schema 键名）、规定的枚举取值（如 `proceed`、`wait`、`bullish`、`bearish`）、策略文件名、K 线序号格式（如 `K1`、`K42-K1`）。
+""".strip()
+
+_THINKING_CONTENT_OUTPUT_RULE = """
+## 思考与正式输出分离（硬约束，违反则程序判定失败）
+
+启用扩展思考时，**思考区仅用于推演草稿**；**程序只读取 assistant 消息的 `content`（正文）** 做 JSON 校验，**不会**把 `reasoning_content` / 思考流当作阶段结果。
+
+**你必须做到：**
+1. 思考可以较长，但思考结束后**必须在 `content` 正文里输出完整、可 `json.loads` 的裸 JSON 对象**（阶段一诊断 JSON 或阶段二决策 JSON）。
+2. **禁止**把完整 JSON **只**写在思考里而让 `content` 为空、空白或纯叙述文字。
+3. **禁止**在 `content` 里输出 markdown 说明、英文长文分析、或「详见上文思考」——`content` 里**只能**是裸 JSON。
+4. 若思考预算较大，请**预留足够 token** 给最终 JSON；宁可压缩思考篇幅，也**不得**省略正文 JSON。
+
+阶段一：`content` = 阶段一诊断 JSON（含 `gate_trace`、`gate_result` 等必填字段）。
+阶段二：`content` = 阶段二决策 JSON（含 `decision`、`decision_trace`、`terminal` 等必填字段）。
+""".strip()
+
+_STAGE1_TAIL_REMINDER = (
+    "【最后一步·必做】思考结束后，立即在 assistant 正文 `content` 输出完整阶段一裸 JSON。"
+    "思考请用简体中文并尽量简洁；`content` 不得为空。"
+    "若 token 紧张，优先保证 `content` 有 JSON，可缩短思考。"
+).strip()
+
+_STAGE2_TAIL_REMINDER = (
+    "【最后一步·必做】思考结束后，立即在 assistant 正文 `content` 输出完整阶段二裸 JSON"
+    "（含 decision、decision_trace、terminal）。思考用简体中文并尽量简洁；`content` 不得为空。"
+    "若 token 紧张，优先保证 `content` 有 JSON，可缩短思考。"
+).strip()
 
 # ── Hardcoded output format reminders ─────────────────────────────────────────
 
 _STAGE1_OUTPUT_REMINDER = """
-请严格按照以下 JSON 格式输出诊断结果,不要输出任何其他内容:
+请严格按照以下 JSON 格式输出诊断结果,不要输出任何其他内容。
+**硬约束：思考结束后，必须在 assistant 正文 `content` 输出下方完整阶段一 JSON；不得仅在思考区分析而让 `content` 为空。**
+**思考过程与 JSON 内所有说明性文字必须使用简体中文**（仅 JSON 键名与规定枚举除外）。
+禁止用 markdown 代码围栏（不要写 ```json 或结尾的 ```），只输出裸 JSON 对象。
+JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 
 ```json
 {
@@ -60,7 +103,7 @@ _STAGE1_OUTPUT_REMINDER = """
 - **§9–§11**（入场、风险、下单均属阶段二）
 
 规则：
-- answer 只能是：是 / 否 / 中性 / 等待 / 不适用
+- answer 只能是：是 / 否 / 中性 / 等待 / 不适用（**禁止**写「部分」「待确认」「待定」等——部分一致用 **中性**，尚需下一根K线确认用 **等待**）
 - 任一闸门导致「等待/unknown」时，gate_result 设为 wait 或 unknown，并在最后一条 trace 写明 reason
 - gate_result=proceed 表示可通过闸门进入阶段二；wait/unknown 表示不应进入策略与下单评估
 - gate_trace 与 cycle_position、direction 不得矛盾
@@ -91,6 +134,10 @@ diagnosis_confidence 分档说明:
 
 _STAGE2_OUTPUT_CONTRACT = """
 请严格按照以下 JSON 格式输出决策结果，不要输出任何其他内容。
+**硬约束：思考结束后，必须在 assistant 正文 `content` 输出下方完整阶段二 JSON；不得仅在思考区分析而让 `content` 为空。**
+**思考过程与 JSON 内所有说明性文字必须使用简体中文**（仅 JSON 键名与规定枚举除外）。
+禁止用 markdown 代码围栏（不要写 ```json 或结尾的 ```），只输出裸 JSON 对象。
+JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 重要规则：当 order_type 为“不下单”时，entry_price、take_profit_price、stop_loss_price、order_direction 必须全部为 null。
 
 ```json
@@ -106,6 +153,8 @@ _STAGE2_OUTPUT_CONTRACT = """
     "diagnosis_confidence_reasoning": "",
     "trade_confidence": 70,
     "trade_confidence_reasoning": "",
+    "estimated_win_rate": 50,
+    "estimated_win_rate_reasoning": "",
     "key_factors": [],
     "watch_points": [],
     "risk_assessment": "",
@@ -136,6 +185,8 @@ _STAGE2_OUTPUT_CONTRACT = """
 ```
 
 说明：decision_trace 需输出完整决策路径（通常多条）；每条 trace 的 **bar_range 必须由你根据该节点实际使用的 K 线填写**，不得照抄示例。
+**每条 trace 的 answer 只能是以下五选一**：`是`、`否`、`中性`、`等待`、`不适用`。
+禁止写「部分符合」「部分是」「上涨通道」等；模糊或分类细节写在 **reason**（方向类节点可另填 **branch**）。
 
 ## 阶段二决策路径（二元决策树 §3–§11、§14）
 
@@ -143,7 +194,7 @@ _STAGE2_OUTPUT_CONTRACT = """
 
 1. **§3–§8** 按 cycle_position 走对应结构分支（尖峰/通道/区间/反转/楔形等）
 2. **§9** 入场信号二元检查（9.1→9.5，须先确认信号 K 线收盘）
-3. **§10** 风险收益（必须按序）：**10.1 止损明确 → 10.2 止损不过大 → 10.3 交易者方程 → 10.4 单笔风险**
+3. **§10** 风险收益（必须按序）：**10.1 止损明确 → 10.2 止损不过大 → 10.3 交易者方程**（勿编造具体手数、合约数或资金规模）
 4. **§11** 下单方式（仅当 10.3 为「是」且拟下单时评估 11.1–11.4）
 5. **§14** 禁止行为清单：下单前快速扫描，触犯任一条 → order_type=不下单
 
@@ -151,6 +202,7 @@ _STAGE2_OUTPUT_CONTRACT = """
 - 必须使用已拟定的 entry / stop / target 估算胜率、回报、风险后再判
 - **10.3 通过之前**不得输出具体下单类型；**10.3 之后**才写 §11
 - 因方程不通过而放弃：terminal.node_id 应为 **10.3**，outcome=reject 或 wait
+- 完成 10.3 后，必须把你在方程中使用的**胜率主观估计**写入 decision.estimated_win_rate（0–100 整数），并在 estimated_win_rate_reasoning 简要说明依据；**禁止**留空或仅从 trace 文字里暗示
 
 **跳过规则：**
 - 无持仓：跳过 §12、§13（不写 trace）
@@ -181,30 +233,39 @@ diagnosis_confidence_reasoning：必须简要说明打分依据（如“trending
 - 30-49：较低把握，建议继续等待更清晰信号
 - 0-29：极低把握；若同时判断不应交易，可配合 order_type="不下单"
 trade_confidence_reasoning：必须简要说明打分依据（如“入场信号明确但止损空间偏大，risk:reward 仅 1.5:1”）
+
+三、estimated_win_rate —— 对**本笔交易方案**成交后获利概率的主观估计（0–100 整数）
+- 与 trade_confidence **不是同一概念**：trade_confidence 是对「是否该做这笔决策」的把握；estimated_win_rate 是「若按该 entry/stop/target 成交，你认为获胜的概率」
+- **必须在 §10.3 交易者方程评估完成后**由你自行判断并填写；须与 10.3 节点 reason 中的胜率假设一致
+- order_type=「不下单」时：estimated_win_rate 填 **null**，estimated_win_rate_reasoning 可说明为何不交易
+- 有下单时：estimated_win_rate 为 **必填整数**（不要填区间字符串，取你判断的最可能值，如 47）
+estimated_win_rate_reasoning：必须简要说明依据（如“宽通道顺势 Low1，结构支持约 45–50%，取 47% 用于方程”）
 """.strip()
 
-# txt files merged into each stage system prompt (order preserved)
-STAGE1_PROMPT_TXT_FILES: tuple[str, ...] = (
+# txt files merged into each stage prompt (order preserved)
+COMMON_SYSTEM_PROMPT_TXT_FILES: tuple[str, ...] = (
     "提示词大纲_人设与思维方式.txt",
+)
+
+STAGE1_TASK_PROMPT_TXT_FILES: tuple[str, ...] = (
     "市场诊断框架.txt",
     "二元决策.txt",
     "文件16-K线信号识别.txt",
 )
 
 STAGE2_BASE_PROMPT_TXT_FILES: tuple[str, ...] = (
-    "提示词大纲_人设与思维方式.txt",
     "二元决策.txt",
     "文件17-止损和止盈与仓位管理.txt",
 )
 
 
 def stage1_prompt_txt_files() -> list[str]:
-    """Return ordered .txt filenames injected in Stage 1 system prompt."""
-    return list(STAGE1_PROMPT_TXT_FILES)
+    """Return ordered .txt filenames injected in the Stage 1 prompt."""
+    return [*COMMON_SYSTEM_PROMPT_TXT_FILES, *STAGE1_TASK_PROMPT_TXT_FILES]
 
 
 def stage2_prompt_txt_files(strategy_files: list[str] | None = None) -> list[str]:
-    """Return ordered .txt filenames injected in Stage 2 system prompt."""
+    """Return ordered .txt filenames injected in the Stage 2 continuation."""
     routed = [f for f in (strategy_files or []) if f]
     return [STAGE2_BASE_PROMPT_TXT_FILES[0], *routed, STAGE2_BASE_PROMPT_TXT_FILES[1]]
 
@@ -236,13 +297,14 @@ class PromptAssembler:
     # ── K-line table rendering ────────────────────────────────────────────────
 
     @staticmethod
-    def _render_kline_table(frame: KlineFrame) -> str:
+    def _render_kline_table(frame: KlineFrame, limit: int | None = None) -> str:
         """Render the K-line data as a text table (newest bar first)."""
         lines = [
             "序号 | 时间                | 开盘价    | 最高价    | 最低价    | 收盘价    | 成交量    | EMA20     | ATR14",
             "-----+--------------------+----------+----------+----------+----------+----------+-----------+----------",
         ]
-        for i, bar in enumerate(frame.bars):
+        bars = frame.bars[:limit] if limit is not None else frame.bars
+        for i, bar in enumerate(bars):
             ema = frame.indicators.ema20[i]
             atr = frame.indicators.atr14[i]
             ema_str = f"{ema:.4f}" if not math.isnan(ema) else "N/A"
@@ -260,28 +322,108 @@ class PromptAssembler:
 
     def build_stage1(self, frame: KlineFrame) -> list[dict]:
         """Build the message list for Stage 1 (market diagnosis)."""
-        system_parts = [
-            *(self._load(name) for name in STAGE1_PROMPT_TXT_FILES),
+        system_content = self._build_common_system_prompt()
+        user_content = self._build_stage1_user_prompt(frame)
+
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+
+    def build_incremental_stage1(
+        self,
+        frame: KlineFrame,
+        previous_record: AnalysisRecord,
+        new_bar_count: int,
+    ) -> list[dict]:
+        """Build Stage 1 as an incremental update from a previous record."""
+        system_content = self._build_common_system_prompt()
+        user_content = self._build_incremental_stage1_user_prompt(
+            frame,
+            previous_record,
+            new_bar_count,
+        )
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+
+    def _build_common_system_prompt(self) -> str:
+        """Build the stable system prompt shared by Stage 1 and Stage 2."""
+        system_parts = [_LANGUAGE_ZH_RULE, _THINKING_CONTENT_OUTPUT_RULE]
+        system_parts.extend(self._load(name) for name in COMMON_SYSTEM_PROMPT_TXT_FILES)
+        return "\n\n---\n\n".join(p for p in system_parts if p)
+
+    def _build_stage1_user_prompt(self, frame: KlineFrame) -> str:
+        """Build the Stage 1 task turn; stage-specific rules stay out of system."""
+        stage1_parts = [
+            *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
             _STAGE1_OUTPUT_REMINDER,
         ]
-        system_content = "\n\n" + "\n\n---\n\n".join(p for p in system_parts if p)
-
+        stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
         kline_table = self._render_kline_table(frame)
         n_bars = len(frame.bars)
-        user_content = (
+        return (
+            "## 阶段一任务\n\n"
+            "你现在只执行阶段一：市场诊断与闸门判断。不要评估具体下单、止损、止盈或仓位。\n\n"
+            f"{stage1_context}\n\n"
+            "---\n\n"
             f"## 当前分析目标\n\n"
             f"品种:{frame.symbol} 周期:{frame.timeframe} K线数量:{n_bars}\n"
             f"（K线序号：1=最新已收盘，最大 K{n_bars}；"
             f"每个决策节点的 bar_range 由你自行选择子区间，勿超出 K{n_bars}-K1）\n\n"
             f"## K线数据(序号1=最新已收盘K线,序号越大越早;不含当前未收盘K线)\n\n"
             f"{kline_table}\n\n"
-            f"请根据以上数据,按照系统提示中的格式输出 JSON 诊断结果。"
+            f"请根据以上数据，严格输出阶段一 JSON 诊断结果。\n\n"
+            f"{_STAGE1_TAIL_REMINDER}"
         )
 
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
+    def _build_incremental_stage1_user_prompt(
+        self,
+        frame: KlineFrame,
+        previous_record: AnalysisRecord,
+        new_bar_count: int,
+    ) -> str:
+        """Build a Stage 1 update turn using the last completed analysis."""
+        stage1_parts = [
+            *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
+            _STAGE1_OUTPUT_REMINDER,
         ]
+        stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
+        n_bars = len(frame.bars)
+        new_count = max(0, min(new_bar_count, n_bars))
+        new_kline_table = self._render_kline_table(frame, limit=new_count)
+        full_kline_table = self._render_kline_table(frame)
+        previous_summary = {
+            "meta": previous_record.meta.model_dump(),
+            "stage1_diagnosis": previous_record.stage1_diagnosis or {},
+            "stage2_decision": previous_record.stage2_decision or {},
+            "strategy_files_used": previous_record.strategy_files_used or [],
+        }
+        return (
+            "## 阶段一增量任务\n\n"
+            "你现在只执行阶段一：基于上一轮已完成分析和新增 K 线，更新市场诊断与闸门判断。\n"
+            "不要评估具体下单、止损、止盈或仓位；这些留到阶段二。\n\n"
+            "增量分析规则：\n"
+            "- 先检查上一轮诊断在新增 K 线后是否仍成立。\n"
+            "- 如果市场结构未被破坏，可以延续上一轮 cycle_position/direction，但必须用新增 K 线重新说明依据。\n"
+            "- 如果新增 K 线出现突破、反转、极端波动或让原结论失效，必须更新诊断。\n"
+            "- 输出仍必须是完整阶段一 JSON，而不是差异补丁。\n\n"
+            f"{stage1_context}\n\n"
+            "---\n\n"
+            f"## 当前分析目标\n\n"
+            f"品种:{frame.symbol} 周期:{frame.timeframe} K线数量:{n_bars} 新增已收盘K线:{new_count}\n"
+            f"（K线序号：1=最新已收盘，最大 K{n_bars}；"
+            f"每个决策节点的 bar_range 由你自行选择子区间，勿超出 K{n_bars}-K1）\n\n"
+            "## 上一轮已完成分析（仅作为延续上下文）\n\n"
+            f"```json\n{json.dumps(previous_summary, ensure_ascii=False, indent=2)}\n```\n\n"
+            f"## 新增 K线数据(共{new_count}根，序号1=最新已收盘)\n\n"
+            f"{new_kline_table}\n\n"
+            f"## 当前完整 K线数据(共{n_bars}根，用于必要时复核整体结构)\n\n"
+            f"{full_kline_table}\n\n"
+            "请基于上一轮结论、新增K线和当前完整K线，严格输出更新后的阶段一 JSON 诊断结果。\n\n"
+            f"{_STAGE1_TAIL_REMINDER}"
+        )
 
     # ── Stage 2 ───────────────────────────────────────────────────────────────
 
@@ -291,20 +433,81 @@ class PromptAssembler:
         stage1_json: dict,
         strategy_files: list[str],
         experience_entries: list[Any],
+        *,
+        decision_stance: str = "conservative",
     ) -> list[dict]:
-        """Build the message list for Stage 2 (trading decision)."""
-        # System prompt: 人设 → 策略文件 → 风控 → 经验 → 输出契约
-        system_parts = [self._load(name) for name in stage2_prompt_txt_files(strategy_files)]
+        """Build a standalone Stage 2 request (kept for tests/tools)."""
+        system_content = self._build_common_system_prompt()
+        user_content = self._build_stage2_user_prompt(
+            frame=frame,
+            stage1_json=stage1_json,
+            strategy_files=strategy_files,
+            experience_entries=experience_entries,
+            include_kline_table=True,
+            decision_stance=decision_stance,
+        )
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
 
+    def build_stage2_continuation(
+        self,
+        *,
+        frame: KlineFrame,
+        stage1_messages: list[dict],
+        stage1_reply_content: str,
+        stage1_json: dict,
+        strategy_files: list[str],
+        experience_entries: list[Any],
+        decision_stance: str = "conservative",
+    ) -> list[dict]:
+        """Build Stage 2 continuation without duplicating the Stage 1 user prompt.
+
+        Stage 1 user turn is huge (framework + 100 bars). Re-sending it for Stage 2
+        balloons prompt tokens and often exhausts thinking before any content JSON.
+        """
+        system_content = next(
+            (m.get("content", "") for m in stage1_messages if m.get("role") == "system"),
+            self._build_common_system_prompt(),
+        )
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "assistant", "content": stage1_reply_content},
+            {
+                "role": "user",
+                "content": self._build_stage2_user_prompt(
+                    frame=frame,
+                    stage1_json=stage1_json,
+                    strategy_files=strategy_files,
+                    experience_entries=experience_entries,
+                    include_kline_table=True,
+                    decision_stance=decision_stance,
+                ),
+            },
+        ]
+
+    def _build_stage2_user_prompt(
+        self,
+        *,
+        frame: KlineFrame,
+        stage1_json: dict,
+        strategy_files: list[str],
+        experience_entries: list[Any],
+        include_kline_table: bool,
+        decision_stance: str = "conservative",
+    ) -> str:
+        """Build the Stage 2 task turn for standalone or continuation mode."""
+        stance_block = build_decision_stance_guidance(normalize_stance(decision_stance))
+        stage2_parts = [
+            stance_block,
+            *(self._load(name) for name in stage2_prompt_txt_files(strategy_files)),
+        ]
         if experience_entries:
-            exp_text = self._render_experience(experience_entries)
-            system_parts.append(exp_text)
+            stage2_parts.append(self._render_experience(experience_entries))
+        stage2_parts.append(_STAGE2_OUTPUT_CONTRACT)
+        stage2_context = "\n\n---\n\n".join(p for p in stage2_parts if p)
 
-        system_parts.append(_STAGE2_OUTPUT_CONTRACT)
-
-        system_content = "\n\n" + "\n\n---\n\n".join(p for p in system_parts if p)
-
-        # User prompt
         kline_table = self._render_kline_table(frame)
         gate_result = stage1_json.get("gate_result", "proceed")
         gate_trace = stage1_json.get("gate_trace") or []
@@ -316,31 +519,33 @@ class PromptAssembler:
             )
 
         n_bars = len(frame.bars)
-        user_content = (
+        kline_block = (
+            f"## K线数据(与阶段一相同, 共{n_bars}根；各节点 bar_range 由你据实填写)\n\n{kline_table}\n\n"
+            if include_kline_table
+            else f"## K线数据\n\n沿用上一轮阶段一用户消息中的同一份 K线数据，共 {n_bars} 根；各节点 bar_range 由你据实填写。\n\n"
+        )
+        return (
+            "## 阶段二任务\n\n"
+            "继续上一轮对话。你已经完成阶段一诊断；现在只执行阶段二：交易决策、风险收益和下单方式评估。\n"
+            "上一轮 assistant 消息是阶段一完整响应，下面的 JSON 是程序校验通过后的阶段一诊断结果，若两者有细微格式差异，以此处 JSON 为准。\n\n"
+            f"{stage2_context}\n\n"
+            "---\n\n"
             f"## 阶段一诊断结果\n\n```json\n{json.dumps(stage1_json, ensure_ascii=False, indent=2)}\n```\n\n"
             f"{gate_block}"
-            f"## K线数据(与阶段一相同, 共{n_bars}根；各节点 bar_range 由你据实填写)\n\n{kline_table}\n\n"
+            f"{kline_block}"
             f"请根据以上诊断、闸门路径和K线数据,按《二元决策.txt》§3–§15 输出 JSON 决策结果"
             f"(含 decision_trace 与 terminal)。\n"
-            f"注意:如果判断不下单,entry_price、take_profit_price、stop_loss_price、order_direction 必须全部为 null。"
+            f"注意:如果判断不下单,entry_price、take_profit_price、stop_loss_price、order_direction 必须全部为 null。\n\n"
+            f"{_STAGE2_TAIL_REMINDER}"
         )
-
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
 
     def stage2_system_prompt_only(
         self,
         strategy_files: list[str],
         experience_entries: list[Any],
     ) -> str:
-        """Return only the Stage 2 system prompt string (for FreeChatSession reuse)."""
-        system_parts = [self._load(name) for name in stage2_prompt_txt_files(strategy_files)]
-        if experience_entries:
-            system_parts.append(self._render_experience(experience_entries))
-        system_parts.append(_STAGE2_OUTPUT_CONTRACT)
-        return "\n\n" + "\n\n---\n\n".join(p for p in system_parts if p)
+        """Return the shared system prompt used by Stage 2 requests."""
+        return self._build_common_system_prompt()
 
     @staticmethod
     def _render_experience(entries: list[Any]) -> str:

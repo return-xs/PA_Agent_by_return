@@ -86,6 +86,44 @@ class TestNoLinesWhenNotTrading:
             f"but found {_count_infinite_lines(chart_widget)}."
         )
 
+    def test_short_decision_shows_down_arrow(self, chart_widget, qtbot):
+        """做空 decision draws a ▼ marker at the newest bar."""
+        from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
+
+        bars = tuple(
+            KlineBar(
+                seq=i + 1,
+                ts_open=1_700_000_000_000 - i * 3_600_000,
+                open=2000.0,
+                high=2010.0,
+                low=1990.0,
+                close=2005.0,
+                volume=100.0,
+                closed=True,
+            )
+            for i in range(5)
+        )
+        frame = KlineFrame(
+            symbol="XAUUSD",
+            timeframe="1h",
+            bars=bars,
+            snapshot_ts_local_ms=1_700_000_000_000,
+            indicators=IndicatorBundle(ema20=tuple([2000.0] * 5), atr14=tuple([10.0] * 5)),
+        )
+        chart_widget.set_frame(frame)
+        qtbot.wait(100)
+
+        chart_widget.set_decision({
+            "order_type": "限价单",
+            "order_direction": "做空",
+            "entry_price": 2000.0,
+            "take_profit_price": 1980.0,
+            "stop_loss_price": 2010.0,
+        })
+        qtbot.wait(100)
+
+        assert len(chart_widget._direction_items) >= 1
+
     def test_reset_clears_all_lines(self, chart_widget):
         """reset() must remove all InfiniteLine items."""
         trading_decision = {

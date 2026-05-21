@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import QApplication, QPlainTextEdit
 from pa_agent.app_context import AppContext
 from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
 from pa_agent.data.kline_buffer import KlineBuffer
-from pa_agent.orchestrator.exception_counter import ExceptionCounter
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
 
 
@@ -73,13 +72,6 @@ def _make_reply(content_dict: dict) -> MagicMock:
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def exc_counter(tmp_path):
-    counter = ExceptionCounter(state_path=tmp_path / "exception_state.json")
-    counter.load()
-    return counter
-
-
-@pytest.fixture
 def pending_writer():
     return MagicMock()
 
@@ -115,10 +107,9 @@ def buffer():
 
 
 @pytest.fixture
-def app_ctx(exc_counter, pending_writer, mock_data_source, buffer, tmp_path):
+def app_ctx(pending_writer, mock_data_source, buffer, tmp_path):
     """Build a minimal AppContext with mocked components."""
     ctx = AppContext()
-    ctx.exc_counter = exc_counter
     ctx.pending_writer = pending_writer
     ctx.data_source = mock_data_source
     ctx.buffer = buffer
@@ -130,13 +121,12 @@ def app_ctx(exc_counter, pending_writer, mock_data_source, buffer, tmp_path):
 class TestSwitchMidAnalysis:
     """Verify that switching symbol/TF while stage-2 is in progress:
     - cancels the worker within 100 ms
-    - does not increment consecutive_count
     - calls save_partial("user_switched")
     - disables the FreeChatSession (Tab2 input disabled)
     """
 
     def test_worker_cancelled_within_100ms(
-        self, qtbot, app_ctx, exc_counter, pending_writer, mock_data_source, buffer
+        self, qtbot, app_ctx, pending_writer, mock_data_source, buffer
     ):
         """Switching symbol while stage-2 is running cancels the worker quickly."""
         from pa_agent.gui.main_window import MainWindow
@@ -201,7 +191,6 @@ class TestSwitchMidAnalysis:
             assembler=app_ctx.assembler,
             router=route_strategy_files,
             validator=JsonValidator(),
-            exc_counter=exc_counter,
             pending_writer=pending_writer,
             exp_reader=app_ctx.exp_reader,
         )
@@ -221,9 +210,6 @@ class TestSwitchMidAnalysis:
         # Wait for stage2 to start (so the worker is genuinely mid-analysis)
         assert stage2_started_event.wait(timeout=5.0), "Stage2 did not start within 5s"
 
-        # Record consecutive_count before the switch
-        count_before = exc_counter.consecutive_count
-
         # Trigger symbol switch — this should cancel the worker
         t0 = time.monotonic()
         window._on_symbol_or_tf_changed("EURUSD", "1h")
@@ -242,85 +228,8 @@ class TestSwitchMidAnalysis:
         # Wait for worker to actually finish
         worker.wait(2000)
 
-    def test_consecutive_count_unchanged_after_switch(
-        self, qtbot, app_ctx, exc_counter, pending_writer
-    ):
-        """consecutive_count must not increase when worker is cancelled by switch."""
-        from pa_agent.gui.main_window import MainWindow, _AnalysisWorker
-        from pa_agent.ai.json_validator import JsonValidator
-        from pa_agent.ai.router import route_strategy_files
-        from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
-
-        stage2_started = __import__("threading").Event()
-        call_count = [0]
-
-        def chat_dispatch(messages, **kwargs):
-            idx = call_count[0]
-            call_count[0] += 1
-            if idx == 0:
-                return _make_reply(VALID_STAGE1)
-            else:
-                ct = kwargs.get("cancel_token")
-                stage2_started.set()
-                if ct is not None:
-                    ct.wait(timeout=10.0)
-                return _make_reply(VALID_STAGE2)
-
-        mock_client = MagicMock()
-        mock_client.stream_chat.side_effect = chat_dispatch
-
-        app_ctx.client = mock_client
-        app_ctx.assembler = MagicMock()
-        app_ctx.assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
-        app_ctx.assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
-        app_ctx.router = route_strategy_files
-        app_ctx.validator = JsonValidator()
-        app_ctx.exp_reader = MagicMock()
-        app_ctx.exp_reader.read_top5.return_value = []
-
-        window = MainWindow(ctx=app_ctx)
-        qtbot.addWidget(window)
-
-        orchestrator = TwoStageOrchestrator(
-            client=mock_client,
-            assembler=app_ctx.assembler,
-            router=route_strategy_files,
-            validator=JsonValidator(),
-            exc_counter=exc_counter,
-            pending_writer=pending_writer,
-            exp_reader=app_ctx.exp_reader,
-        )
-
-        cancel_token = CancelToken()
-        window._cancel_token = cancel_token
-        worker = _AnalysisWorker(
-            orchestrator=orchestrator,
-            frame=_make_frame(),
-            cancel_token=cancel_token,
-            parent=None,
-        )
-        window._worker = worker
-        window._analysis_in_progress = True
-        worker.start()
-
-        assert stage2_started.wait(timeout=5.0), "Stage2 did not start"
-
-        count_before = exc_counter.consecutive_count
-
-        # Trigger switch
-        window._on_symbol_or_tf_changed("BTCUSD", "4h")
-
-        # Wait for worker to finish
-        worker.wait(3000)
-
-        # consecutive_count must not have changed
-        assert exc_counter.consecutive_count == count_before, (
-            f"consecutive_count changed from {count_before} to "
-            f"{exc_counter.consecutive_count} after user switch"
-        )
-
     def test_save_partial_called_with_user_switched(
-        self, qtbot, app_ctx, exc_counter, pending_writer
+        self, qtbot, app_ctx, pending_writer
     ):
         """save_partial must be called with reason='user_switched' on symbol switch."""
         from pa_agent.gui.main_window import MainWindow, _AnalysisWorker
@@ -363,7 +272,6 @@ class TestSwitchMidAnalysis:
             assembler=app_ctx.assembler,
             router=route_strategy_files,
             validator=JsonValidator(),
-            exc_counter=exc_counter,
             pending_writer=pending_writer,
             exp_reader=app_ctx.exp_reader,
         )
@@ -411,7 +319,7 @@ class TestSwitchMidAnalysis:
         )
 
     def test_free_chat_session_disabled_after_switch(
-        self, qtbot, app_ctx, exc_counter, pending_writer
+        self, qtbot, app_ctx, pending_writer
     ):
         """FreeChatSession must be None and Tab2 input disabled after symbol switch."""
         from pa_agent.gui.main_window import MainWindow
@@ -441,7 +349,7 @@ class TestSwitchMidAnalysis:
         )
 
     def test_cancel_token_set_within_100ms(
-        self, qtbot, app_ctx, exc_counter, pending_writer
+        self, qtbot, app_ctx, pending_writer
     ):
         """cancel_token.is_set() must become True within 100ms of triggering switch."""
         from pa_agent.gui.main_window import MainWindow, _AnalysisWorker
@@ -484,7 +392,6 @@ class TestSwitchMidAnalysis:
             assembler=app_ctx.assembler,
             router=route_strategy_files,
             validator=JsonValidator(),
-            exc_counter=exc_counter,
             pending_writer=pending_writer,
             exp_reader=app_ctx.exp_reader,
         )

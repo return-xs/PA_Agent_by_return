@@ -7,9 +7,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
-from pa_agent.orchestrator.exception_counter import ExceptionCounter
-
-
 # ── Valid JSON payloads ───────────────────────────────────────────────────────
 
 SAMPLE_GATE_TRACE = [
@@ -126,6 +123,8 @@ VALID_STAGE2 = {
         "diagnosis_confidence_reasoning": "周期位置明确，趋势方向清晰",
         "trade_confidence": 70,
         "trade_confidence_reasoning": "入场信号明确，风险回报比合理",
+        "estimated_win_rate": 55,
+        "estimated_win_rate_reasoning": "结构清晰，方程边际通过，取 55% 用于 10.3",
         "key_factors": ["factor1"],
         "watch_points": ["watch1"],
         "risk_assessment": "low risk",
@@ -195,13 +194,6 @@ def make_frame() -> KlineFrame:
 @pytest.fixture
 def frame():
     return make_frame()
-
-
-@pytest.fixture
-def exc_counter(tmp_path):
-    counter = ExceptionCounter(state_path=tmp_path / "exception_state.json")
-    counter.load()
-    return counter
 
 
 @pytest.fixture

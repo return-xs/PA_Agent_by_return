@@ -23,7 +23,6 @@ class AppContext:
     assembler: Any = None         # PromptAssembler
     router: Any = None            # route_strategy_files callable
     validator: Any = None         # JsonValidator
-    exc_counter: Any = None       # ExceptionCounter
     pending_writer: Any = None    # PendingWriter
     exp_reader: Any = None        # ExperienceReader
     ledger: Any = None            # SessionTokenLedger
@@ -33,7 +32,6 @@ class AppContext:
         """Wire all real components and return a fully initialised AppContext."""
         from pa_agent.config.paths import (
             SETTINGS_JSON_PATH,
-            EXCEPTION_STATE_JSON_PATH,
             RECORDS_PENDING_DIR,
             EXPERIENCE_DIR,
             PROMPT_DIR,
@@ -49,7 +47,6 @@ class AppContext:
         from pa_agent.ai.router import route_strategy_files
         from pa_agent.ai.json_validator import JsonValidator
         from pa_agent.ai.session_ledger import SessionTokenLedger
-        from pa_agent.orchestrator.exception_counter import ExceptionCounter
         from pa_agent.records.pending_writer import PendingWriter
         from pa_agent.records.experience_reader import ExperienceReader
 
@@ -97,13 +94,6 @@ class AppContext:
         validator = JsonValidator()
         router = route_strategy_files
 
-        # ── Exception counter ─────────────────────────────────────────────────
-        exc_counter = ExceptionCounter(
-            state_path=EXCEPTION_STATE_JSON_PATH,
-            event_bus=event_bus,
-        )
-        exc_counter.load()
-
         # ── Pending writer ────────────────────────────────────────────────────
         pending_writer = PendingWriter(
             pending_dir=RECORDS_PENDING_DIR,
@@ -127,7 +117,6 @@ class AppContext:
             assembler=assembler,
             router=router,
             validator=validator,
-            exc_counter=exc_counter,
             pending_writer=pending_writer,
             exp_reader=exp_reader,
             ledger=ledger,

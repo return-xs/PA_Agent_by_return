@@ -12,7 +12,6 @@ import pytest
 from pa_agent.data.base import KlineBar
 from pa_agent.data.kline_buffer import KlineBuffer
 from pa_agent.app_context import AppContext
-from pa_agent.orchestrator.exception_counter import ExceptionCounter
 from pa_agent.ai.json_validator import JsonValidator
 from pa_agent.ai.router import route_strategy_files
 
@@ -63,9 +62,6 @@ def _make_ctx(tmp_path, stage2_response=None):
     mock_assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
     mock_assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
 
-    exc_counter = ExceptionCounter(state_path=tmp_path / "exc.json")
-    exc_counter.load()
-
     pending_writer = MagicMock()
 
     ctx = AppContext()
@@ -74,12 +70,11 @@ def _make_ctx(tmp_path, stage2_response=None):
     ctx.assembler = mock_assembler
     ctx.router = route_strategy_files
     ctx.validator = JsonValidator()
-    ctx.exc_counter = exc_counter
     ctx.pending_writer = pending_writer
     ctx.exp_reader = MagicMock()
     ctx.exp_reader.read_top5.return_value = []
 
-    return ctx, pending_writer, exc_counter
+    return ctx, pending_writer
 
 
 @pytest.mark.e2e
@@ -87,7 +82,7 @@ def test_happy_path_shows_trading_decision(qtbot, tmp_path):
     """Full two-stage analysis completes and DecisionPanel shows a trade."""
     from pa_agent.gui.main_window import MainWindow
 
-    ctx, pending_writer, exc_counter = _make_ctx(tmp_path)
+    ctx, pending_writer = _make_ctx(tmp_path)
 
     window = MainWindow(ctx)
     qtbot.addWidget(window)
@@ -118,6 +113,3 @@ def test_happy_path_shows_trading_decision(qtbot, tmp_path):
 
     # PendingWriter.save_full should have been called
     pending_writer.save_full.assert_called_once()
-
-    # Exception counter should be zero (successful round-trip)
-    assert exc_counter.consecutive_count == 0

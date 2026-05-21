@@ -1,0 +1,26 @@
+base_url=https://www.packyapi.com/v1
+model=claude-sonnet-4-6 thinking=True effort=max
+
+=== GET /models ===
+model_count=5
+  claude-opus-4-5-20251101
+  claude-opus-4-6
+  claude-opus-4-7
+  claude-sonnet-4-5-20250929
+  claude-sonnet-4-6
+sonnet_ids=['claude-sonnet-4-5-20250929', 'claude-sonnet-4-6']
+
+=== chat (thinking off) ===
+content='2'
+usage=AIUsage(prompt_tokens=19, cached_prompt_tokens=0, completion_tokens=5, total_tokens=24)
+
+=== stream_chat (stage1-shaped system+user, thinking on) ===
+stage1_shape ERROR: ImportError("cannot import name 'Bar' from 'pa_agent.data.base' (D:\\cl\\PA_Agent\\pa_agent\\data\\base.py)")
+
+=== stream_chat (thinking on, mini JSON) ===
+content_len=26 reasoning_len=37
+content_preview='{"ok":true,"stage":"test"}'
+stream_deltas reasoning=3 content=1
+usage=AIUsage(prompt_tokens=62, cached_prompt_tokens=0, completion_tokens=28, total_tokens=90)
+finish_reason=None
+content JSON: parse OK

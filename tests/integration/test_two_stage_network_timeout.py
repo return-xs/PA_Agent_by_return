@@ -14,8 +14,8 @@ from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
 
 
-def test_network_timeout_stage1(frame, exc_counter, pending_writer, assembler, exp_reader):
-    """APITimeoutError on stage1 → consecutive_count unchanged, Stage1Failed emitted."""
+def test_network_timeout_stage1(frame, pending_writer, assembler, exp_reader):
+    """APITimeoutError on stage1 → Stage1Failed emitted."""
     client = MagicMock()
     # openai.APITimeoutError requires a `request` parameter
     client.stream_chat.side_effect = openai.APITimeoutError(request=MagicMock())
@@ -26,7 +26,6 @@ def test_network_timeout_stage1(frame, exc_counter, pending_writer, assembler, e
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -39,9 +38,6 @@ def test_network_timeout_stage1(frame, exc_counter, pending_writer, assembler, e
         cancel_token=cancel_token,
         on_event=events.append,
     )
-
-    # Network errors must NOT increment consecutive_count (R8.9)
-    assert exc_counter.consecutive_count == 0
 
     # Stage1Failed event must appear
     assert OrchestratorEvent.Stage1Failed in events

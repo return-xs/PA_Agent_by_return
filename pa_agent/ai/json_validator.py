@@ -5,7 +5,6 @@ Categories:
   b — missing required field
   c — illegal value (enum violation, type mismatch, 不下单 price non-null, etc.)
   d — plain text (no JSON structure at all)
-  e — consecutive exception streak (set externally by ExceptionCounter)
 """
 from __future__ import annotations
 
@@ -43,14 +42,113 @@ Result = Ok | ValidationError
 # ── Markdown fence stripper ───────────────────────────────────────────────────
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_TRAILING_FENCE_RE = re.compile(r"\n?```\s*$")
+_LEADING_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?", re.IGNORECASE)
+
+
+def _extract_outer_json_object(text: str) -> str:
+    """Return the first top-level `{...}` object, ignoring trailing prose/fences."""
+    start = text.find("{")
+    if start < 0:
+        return text.strip()
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return text[start:].strip()
 
 
 def _strip_fences(text: str) -> str:
-    """Remove markdown code fences, returning the inner content."""
-    m = _FENCE_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    return text.strip()
+    """Remove markdown fences and isolate the JSON object payload."""
+    t = text.strip()
+    if not t:
+        return t
+
+    # Fully fenced ```json ... ```
+    if t.startswith("```"):
+        m = _FENCE_RE.search(t)
+        if m:
+            t = m.group(1).strip()
+        else:
+            t = _LEADING_FENCE_RE.sub("", t, count=1).strip()
+
+    # Common model mistake: raw JSON + trailing ``` only
+    t = _TRAILING_FENCE_RE.sub("", t).strip()
+
+    return _repair_unescaped_quotes(_extract_outer_json_object(t))
+
+
+# ── Unescaped quote repair ────────────────────────────────────────────────────
+
+_STRING_END_CHARS = frozenset(",:}]")
+
+
+def _repair_unescaped_quotes(text: str) -> str:
+    """Escape ``"`` inside JSON string values that were not backslash-escaped.
+
+    Uses a peek-ahead heuristic: a quote ends the string only when the next
+    non-whitespace character is structural (`,`, `:`, `}`, `]`, or EOF).
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+            i += 1
+            continue
+
+        if escape:
+            escape = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j >= n or text[j] in _STRING_END_CHARS:
+                in_string = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
 
 
 # ── JsonValidator ─────────────────────────────────────────────────────────────

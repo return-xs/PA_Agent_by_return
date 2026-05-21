@@ -98,6 +98,20 @@ class MT5Source(DataSource):
 
     # ── Discovery ─────────────────────────────────────────────────────────────
 
+    def is_symbol_available(self, symbol: str) -> bool:
+        """Return True if *symbol* exists in the connected MT5 terminal."""
+        name = (symbol or "").strip()
+        if not name:
+            return False
+        if not self._connected:
+            return True
+        try:
+            import MetaTrader5 as mt5  # type: ignore[import]
+            return mt5.symbol_info(name) is not None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("MT5 symbol_info(%s) failed: %s", name, exc)
+            return False
+
     def list_symbols(self) -> list[str]:
         """Return all symbols available in the MT5 terminal."""
         if not self._connected:

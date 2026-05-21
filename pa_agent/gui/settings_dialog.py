@@ -98,6 +98,30 @@ class SettingsDialog(QDialog):
         self._context_warning_spin.setSuffix(" %")
         general_form.addRow("上下文警告阈值:", self._context_warning_spin)
 
+        self._incremental_max_new_bars_spin = QSpinBox()
+        self._incremental_max_new_bars_spin.setRange(0, 500)
+        self._incremental_max_new_bars_spin.setSuffix(" 根")
+        self._incremental_max_new_bars_spin.setToolTip(
+            "同品种同周期下，若相对上一条成功记录只新增不超过该数量的已收盘K线，"
+            "提交分析时走增量分析；设为 0 可关闭增量分析。"
+        )
+        general_form.addRow("增量分析最大新增K线:", self._incremental_max_new_bars_spin)
+
+        self._decision_stance_combo = QComboBox()
+        self._decision_stance_combo.addItem("保守（当前默认）", "conservative")
+        self._decision_stance_combo.addItem("均衡（比保守更愿意下单）", "balanced")
+        self._decision_stance_combo.addItem("激进（比均衡更愿意下单）", "aggressive")
+        self._decision_stance_combo.addItem(
+            "极度激进（强制选方向与进场方式）",
+            "extreme_aggressive",
+        )
+        self._decision_stance_combo.setToolTip(
+            "仅影响阶段二交易决策倾向；保守与改版前一致。"
+            "均衡、激进逐级提高下单意愿；极度激进在未触犯 §14 硬性禁止时"
+            "必须给出具体做多/做空及限价/突破/市价方案。"
+        )
+        general_form.addRow("交易倾向:", self._decision_stance_combo)
+
         self._last_symbol_edit = QLineEdit()
         general_form.addRow("上次品种:", self._last_symbol_edit)
 
@@ -157,6 +181,13 @@ class SettingsDialog(QDialog):
         self._default_bar_count_spin.setValue(g.default_bar_count)
         self._refresh_interval_spin.setValue(g.refresh_interval_ms)
         self._context_warning_spin.setValue(int(g.context_warning_threshold_pct))
+        self._incremental_max_new_bars_spin.setValue(
+            int(getattr(g, "incremental_max_new_bars", 10))
+        )
+        stance = getattr(g, "decision_stance", "conservative")
+        stance_idx = self._decision_stance_combo.findData(stance)
+        if stance_idx >= 0:
+            self._decision_stance_combo.setCurrentIndex(stance_idx)
         self._last_symbol_edit.setText(g.last_symbol)
         self._last_timeframe_edit.setText(g.last_timeframe)
         self._flow_auto_play_check.setChecked(
@@ -183,6 +214,8 @@ class SettingsDialog(QDialog):
         g.default_bar_count = self._default_bar_count_spin.value()
         g.refresh_interval_ms = self._refresh_interval_spin.value()
         g.context_warning_threshold_pct = float(self._context_warning_spin.value())
+        g.incremental_max_new_bars = self._incremental_max_new_bars_spin.value()
+        g.decision_stance = self._decision_stance_combo.currentData()  # type: ignore[assignment]
         g.last_symbol = self._last_symbol_edit.text().strip()
         g.last_timeframe = self._last_timeframe_edit.text().strip()
         g.decision_flow_auto_play = self._flow_auto_play_check.isChecked()

@@ -26,6 +26,8 @@ def _base_decision(**overrides) -> dict:
         "diagnosis_confidence_reasoning": "test",
         "trade_confidence": 30,
         "trade_confidence_reasoning": "test",
+        "estimated_win_rate": None,
+        "estimated_win_rate_reasoning": "test",
         "key_factors": [],
         "watch_points": [],
         "risk_assessment": "test",
@@ -97,6 +99,7 @@ def test_with_order_all_fields_present_accepted(order_type: str) -> None:
         entry_price=2650.0,
         take_profit_price=2700.0,
         stop_loss_price=2620.0,
+        estimated_win_rate=52,
     )
     obj = _base_stage2(decision)
     result = validator.validate("stage2", json.dumps(obj))

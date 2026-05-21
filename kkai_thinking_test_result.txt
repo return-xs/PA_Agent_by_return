@@ -1,0 +1,49 @@
+
+=== baseline ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 512}
+reasoning_len=0 content_len=2
+content_preview:  2
+usage: {"prompt_tokens": 225, "completion_tokens": 1, "total_tokens": 226, "usage_semantic": "openai", "usage_source": "anthropic", "prompt_tokens_details": {"cached_tokens": 141, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "image_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 225, "output_tokens": 0, "input_tokens_details": null, "claude_cache_creation_5_m_tokens": 0, "claude_cache_creation_1_h_tokens": 0}
+
+=== reasoning_effort_medium ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 2048, "reasoning_effort": "medium"}
+HTTP 503 {"error":{"message":"API error (400): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"paprika_mode: Extra inputs are not permitted\",\"details\":{\"error_visibility\":\"user_facing\"}},\"request_id\":\"req_011CbFEQHTu4PjHyGUFHkDGB\"} (request id: 202605210621379719414438268d9d6RIfooRGb)","type":"\u003cnil\u003e","param":"","code":null}}
+
+=== reasoning_effort_low ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 2048, "reasoning_effort": "low"}
+HTTP 503 {"error":{"message":"API error (400): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"paprika_mode: Extra inputs are not permitted\",\"details\":{\"error_visibility\":\"user_facing\"}},\"request_id\":\"req_011CbFEQN7CaEpkNu5RmsQUk\"} (request id: 20260521062139971493798268d9d6003uH5qH)","type":"\u003cnil\u003e","param":"","code":null}}
+
+=== thinking_object ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 2048, "thinking": {"type": "enabled", "budget_tokens": 1024}}
+reasoning_len=0 content_len=2
+content_preview:  2
+usage: {"prompt_tokens": 181, "completion_tokens": 1, "total_tokens": 182, "usage_semantic": "openai", "usage_source": "anthropic", "prompt_tokens_details": {"cached_tokens": 103, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "image_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 181, "output_tokens": 0, "input_tokens_details": null, "claude_cache_creation_5_m_tokens": 0, "claude_cache_creation_1_h_tokens": 0}
+
+=== stream_reasoning_effort_medium ===
+ERROR IndexError('list index out of range')
+
+=== enable_thinking_true ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 2048, "enable_thinking": true}
+HTTP status=200
+reasoning_len=0 content_len=2
+content_preview:  2
+usage: {"prompt_tokens": 207, "completion_tokens": 1, "total_tokens": 208, "usage_semantic": "openai", "usage_source": "anthropic", "prompt_tokens_details": {"cached_tokens": 121, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "image_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 207, "output_tokens": 0, "input_tokens_details": null, "claude_cache_creation_5_m_tokens": 0, "claude_cache_creation_1_h_tokens": 0}
+
+=== enable_thinking_budget_2048 ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 2048, "enable_thinking": true, "thinking_budget": 2048}
+HTTP status=200
+reasoning_len=0 content_len=2
+content_preview:  2
+usage: {"prompt_tokens": 223, "completion_tokens": 1, "total_tokens": 224, "usage_semantic": "openai", "usage_source": "anthropic", "prompt_tokens_details": {"cached_tokens": 147, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "image_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 223, "output_tokens": 0, "input_tokens_details": null, "claude_cache_creation_5_m_tokens": 0, "claude_cache_creation_1_h_tokens": 0}
+
+=== thinking_budget_8192_max_16384 ===
+request: {"model": "claude-opus-4-5", "stream": false, "max_tokens": 16384, "thinking": {"type": "enabled", "budget_tokens": 8192}}
+HTTP status=200
+reasoning_len=0 content_len=2
+content_preview:  2
+usage: {"prompt_tokens": 224, "completion_tokens": 1, "total_tokens": 225, "usage_semantic": "openai", "usage_source": "anthropic", "prompt_tokens_details": {"cached_tokens": 139, "text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}, "completion_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "image_tokens": 0, "reasoning_tokens": 0}, "input_tokens": 224, "output_tokens": 0, "input_tokens_details": null, "claude_cache_creation_5_m_tokens": 0, "claude_cache_creation_1_h_tokens": 0}
+
+=== stream_thinking_object ===
+request: {"model": "claude-opus-4-5", "stream": true, "max_tokens": 2048, "thinking": {"type": "enabled", "budget_tokens": 1024}}
+HTTP status=200
+stream reasoning_content deltas=0 content deltas=1

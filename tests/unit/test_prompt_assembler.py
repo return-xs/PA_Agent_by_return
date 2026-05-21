@@ -56,16 +56,20 @@ def assembler(tmp_path: Path) -> PromptAssembler:
 
 
 def test_stage1_system_prompt_order(assembler: PromptAssembler):
-    """Stage 1 system prompt must contain the 4 always-on files in order."""
+    """Stage 1 system prompt is stable; task files live in the user turn."""
     frame = _make_frame()
     messages = assembler.build_stage1(frame)
     system = messages[0]["content"]
+    user = messages[1]["content"]
     pos_persona = system.find("提示词大纲_人设与思维方式")
-    pos_diag = system.find("市场诊断框架")
-    pos_binary = system.find("二元决策")
-    pos_signal = system.find("文件16-K线信号识别")
-    assert pos_persona < pos_diag < pos_binary < pos_signal, (
-        "Stage 1 system prompt files are out of order"
+    assert pos_persona >= 0
+    assert "市场诊断框架" not in system
+
+    pos_diag = user.find("市场诊断框架")
+    pos_binary = user.find("二元决策")
+    pos_signal = user.find("文件16-K线信号识别")
+    assert 0 <= pos_diag < pos_binary < pos_signal, (
+        "Stage 1 prompt files are out of order"
     )
 
 
@@ -95,19 +99,23 @@ def test_stage2_user_prompt_includes_gate_trace(assembler: PromptAssembler):
 
 
 def test_stage2_system_prompt_order(assembler: PromptAssembler):
-    """Stage 2 system prompt: 人设 → 二元决策 → 策略 → 风控 → 契约."""
+    """Stage 2 user turn: 二元决策 → 策略 → 风控 → 契约."""
     frame = _make_frame()
     stage1_json = {"cycle_position": "normal_channel", "direction": "bullish"}
     strategy_files = ["上涨通道分析识别.txt", "上涨通道交易策略.txt", "文件13-窄通道与宽通道策略.txt"]
     messages = assembler.build_stage2(frame, stage1_json, strategy_files, [])
     system = messages[0]["content"]
+    user = messages[1]["content"]
 
     pos_persona = system.find("提示词大纲_人设与思维方式")
-    pos_binary = system.find("二元决策")
-    pos_strategy = system.find("上涨通道分析识别")
-    pos_risk = system.find("文件17-止损和止盈与仓位管理")
-    assert pos_persona < pos_binary < pos_strategy < pos_risk, (
-        "Stage 2 system prompt files are out of order"
+    assert pos_persona >= 0
+    assert "二元决策" not in system
+
+    pos_binary = user.find("二元决策")
+    pos_strategy = user.find("上涨通道分析识别")
+    pos_risk = user.find("文件17-止损和止盈与仓位管理")
+    assert 0 <= pos_binary < pos_strategy < pos_risk, (
+        "Stage 2 prompt files are out of order"
     )
 
 
@@ -122,35 +130,35 @@ def test_stage2_user_prompt_contains_stage1_json(assembler: PromptAssembler):
 
 
 def test_stage1_output_reminder_present(assembler: PromptAssembler):
-    """Stage 1 system prompt must contain the output format reminder."""
+    """Stage 1 user turn must contain the output format reminder."""
     frame = _make_frame()
     messages = assembler.build_stage1(frame)
-    system = messages[0]["content"]
-    assert "cycle_position" in system
-    assert "diagnosis_confidence" in system
-    assert "gate_trace" in system
-    assert "gate_result" in system
+    user = messages[1]["content"]
+    assert "cycle_position" in user
+    assert "diagnosis_confidence" in user
+    assert "gate_trace" in user
+    assert "gate_result" in user
 
 
 def test_stage2_output_contract_present(assembler: PromptAssembler):
-    """Stage 2 system prompt must contain the output contract with null rule."""
+    """Stage 2 user turn must contain the output contract with null rule."""
     frame = _make_frame()
     messages = assembler.build_stage2(frame, {}, [], [])
-    system = messages[0]["content"]
-    assert "不下单" in system
-    assert "order_direction" in system
-    assert "decision_trace" in system
-    assert "terminal" in system
+    user = messages[1]["content"]
+    assert "不下单" in user
+    assert "order_direction" in user
+    assert "decision_trace" in user
+    assert "terminal" in user
 
 
 def test_stage2_experience_entries_included(assembler: PromptAssembler):
-    """Stage 2 system prompt must include experience entries when provided."""
+    """Stage 2 user turn must include experience entries when provided."""
     frame = _make_frame()
     entries = [{"cycle_position": "spike", "outcome": "success"}]
     messages = assembler.build_stage2(frame, {}, [], entries)
-    system = messages[0]["content"]
-    assert "经验库" in system
-    assert "案例 1" in system
+    user = messages[1]["content"]
+    assert "经验库" in user
+    assert "案例 1" in user
 
 
 def test_stage2_system_prompt_only_matches_build_stage2(assembler: PromptAssembler):
@@ -199,3 +207,85 @@ def test_stage2_message_roles(assembler: PromptAssembler):
     assert len(messages) == 2
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
+
+
+def test_stage2_continuation_omits_stage1_user_prompt(assembler: PromptAssembler):
+    """Stage 2 must not duplicate the huge Stage 1 user turn; K-line table lives in Stage 2 user."""
+    frame = _make_frame()
+    stage1_messages = assembler.build_stage1(frame)
+    stage1_json = {"cycle_position": "spike", "direction": "bearish", "gate_result": "proceed"}
+
+    messages = assembler.build_stage2_continuation(
+        frame=frame,
+        stage1_messages=stage1_messages,
+        stage1_reply_content='{"cycle_position":"spike","direction":"bearish"}',
+        stage1_json=stage1_json,
+        strategy_files=["上涨通道分析识别.txt"],
+        experience_entries=[],
+    )
+
+    assert [m["role"] for m in messages] == ["system", "assistant", "user"]
+    assert messages[0]["content"] == stage1_messages[0]["content"]
+    assert "cycle_position" in messages[1]["content"]
+    assert "K线数据" in messages[2]["content"]
+    assert "沿用上一轮阶段一用户消息中的同一份 K线数据" not in messages[2]["content"]
+    assert "上涨通道分析识别" in messages[2]["content"]
+    assert "【最后一步·必做】" in messages[2]["content"]
+
+
+def test_stage2_prompt_includes_balanced_stance_guidance(assembler: PromptAssembler):
+    frame = _make_frame()
+    messages = assembler.build_stage2(frame, {}, [], [], decision_stance="balanced")
+    user = messages[1]["content"]
+    assert "交易倾向" in user
+    assert "均衡" in user
+    assert "次优但可执行" in user
+
+
+def test_stage2_prompt_conservative_omits_balanced_only_hints(assembler: PromptAssembler):
+    frame = _make_frame()
+    messages = assembler.build_stage2(frame, {}, [], [], decision_stance="conservative")
+    user = messages[1]["content"]
+    assert "当前系统默认" in user
+    assert "次优但可执行" not in user
+
+
+def test_incremental_stage1_prompt_includes_previous_record_and_new_bars(
+    assembler: PromptAssembler,
+):
+    """Incremental Stage 1 prompt carries previous analysis and new bars."""
+    from pa_agent.records.schema import AnalysisRecord, RecordMeta
+
+    frame = _make_frame(5)
+    previous = AnalysisRecord(
+        meta=RecordMeta(
+            timestamp_local_iso="2026-01-01T00:00:00.000",
+            timestamp_local_ms=1,
+            symbol="XAUUSD",
+            timeframe="1h",
+            bar_count=5,
+            ai_provider={},
+        ),
+        kline_data=[],
+        htf_text="",
+        stage1_messages=[],
+        stage1_response=None,
+        stage1_diagnosis={"cycle_position": "normal_channel"},
+        stage2_messages=[],
+        stage2_response=None,
+        stage2_decision={"decision": {"order_type": "不下单"}},
+        strategy_files_used=["上涨通道分析识别.txt"],
+        experience_loaded=[],
+        exception=None,
+        usage_total={},
+    )
+
+    messages = assembler.build_incremental_stage1(frame, previous, 2)
+
+    assert [m["role"] for m in messages] == ["system", "user"]
+    user = messages[1]["content"]
+    assert "阶段一增量任务" in user
+    assert "新增已收盘K线:2" in user
+    assert "上一轮已完成分析" in user
+    assert "normal_channel" in user
+    assert "当前完整 K线数据" in user

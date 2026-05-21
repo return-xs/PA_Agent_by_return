@@ -13,7 +13,7 @@ from .conftest import VALID_STAGE1, make_reply
 
 
 def test_gate_wait_skips_stage2_chat(
-    frame, exc_counter, pending_writer, assembler, exp_reader,
+    frame, pending_writer, assembler, exp_reader,
 ) -> None:
     stage1_wait = copy.deepcopy(VALID_STAGE1)
     stage1_wait["gate_result"] = "wait"
@@ -37,7 +37,6 @@ def test_gate_wait_skips_stage2_chat(
         assembler=assembler,
         router=route_strategy_files,
         validator=JsonValidator(),
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )

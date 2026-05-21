@@ -2,8 +2,16 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
+from typing import Any
+
+from pa_agent.util.trade_metrics import (
+    compute_risk_reward,
+    format_estimated_win_rate,
+)
+
 from PyQt6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QProgressBar,
     QSizePolicy,
@@ -175,12 +183,36 @@ class DecisionPanel(QWidget):
         trade_title.setStyleSheet("font-weight: bold;")
         layout.addWidget(trade_title)
 
+        self._conclusion_bar = QFrame()
+        self._conclusion_bar.setObjectName("conclusionBar")
+        bar_layout = QHBoxLayout(self._conclusion_bar)
+        bar_layout.setContentsMargins(14, 12, 14, 12)
+        bar_layout.setSpacing(8)
+
+        self._rr_inline_label = QLabel("—")
+        self._rr_inline_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._rr_inline_label.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #58a6ff;"
+        )
+
         self._conclusion_label = QLabel("—")
         self._conclusion_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._conclusion_label.setStyleSheet(
-            "font-size: 18px; font-weight: bold; padding: 12px;"
+        self._conclusion_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+
+        self._win_rate_inline_label = QLabel("—")
+        self._win_rate_inline_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        layout.addWidget(self._conclusion_label)
+        self._win_rate_inline_label.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #a371f7;"
+        )
+
+        bar_layout.addWidget(self._rr_inline_label, stretch=1)
+        bar_layout.addWidget(self._conclusion_label, stretch=2)
+        bar_layout.addWidget(self._win_rate_inline_label, stretch=1)
+        layout.addWidget(self._conclusion_bar)
 
         self._details_widget = QWidget()
         details_layout = QVBoxLayout(self._details_widget)
@@ -348,6 +380,23 @@ class DecisionPanel(QWidget):
             self._trade_conf_label.setVisible(False)
             self._trade_reasoning_label.setVisible(False)
 
+    def _set_conclusion_bar_style(self, *, center_color: str) -> None:
+        self._conclusion_bar.setStyleSheet(
+            "QFrame#conclusionBar {"
+            "  background-color: #21262d;"
+            "  border-radius: 8px;"
+            "}"
+        )
+        self._conclusion_label.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; color: {center_color};"
+        )
+
+    def _reset_conclusion_bar_side_labels(self) -> None:
+        self._rr_inline_label.setText("—")
+        self._win_rate_inline_label.setText("—")
+        self._rr_inline_label.setVisible(False)
+        self._win_rate_inline_label.setVisible(False)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def set_decision(
@@ -369,11 +418,9 @@ class DecisionPanel(QWidget):
         self._apply_diagnosis_confidence(diag_conf, diag_conf_reasoning)
 
         if order_type == _NO_ORDER:
+            self._reset_conclusion_bar_side_labels()
             self._conclusion_label.setText("不下单")
-            self._conclusion_label.setStyleSheet(
-                "font-size: 18px; font-weight: bold; padding: 12px;"
-                "color: #8b949e; background-color: #21262d; border-radius: 8px;"
-            )
+            self._set_conclusion_bar_style(center_color="#8b949e")
             self._details_widget.setVisible(False)
             self._apply_trade_confidence(
                 trade_conf, trade_conf_reasoning,
@@ -387,10 +434,23 @@ class DecisionPanel(QWidget):
 
             self._conclusion_label.setText(order_type)
             color = "#3fb950" if "多" in str(direction) else "#f85149"
-            self._conclusion_label.setStyleSheet(
-                f"font-size: 18px; font-weight: bold; padding: 12px;"
-                f"color: {color}; background-color: #21262d; border-radius: 8px;"
-            )
+            self._set_conclusion_bar_style(center_color=color)
+
+            rr = compute_risk_reward(entry, tp, sl, direction)
+            if rr is not None:
+                self._rr_inline_label.setText(f"盈亏比  {rr['ratio_text']}")
+                self._rr_inline_label.setVisible(True)
+            else:
+                self._rr_inline_label.setText("盈亏比  —")
+                self._rr_inline_label.setVisible(True)
+
+            win_rate = format_estimated_win_rate(decision)
+            if win_rate:
+                self._win_rate_inline_label.setText(f"预估胜率  {win_rate}")
+                self._win_rate_inline_label.setVisible(True)
+            else:
+                self._win_rate_inline_label.setText("预估胜率  —")
+                self._win_rate_inline_label.setVisible(True)
 
             self._direction_label.setText(f"方向  {direction}")
             self._order_type_label.setText(f"类型  {order_type}")
@@ -424,9 +484,11 @@ class DecisionPanel(QWidget):
         self._diag_conf_label.setVisible(False)
         self._diag_reasoning_label.setVisible(False)
 
+        self._reset_conclusion_bar_side_labels()
         self._conclusion_label.setText("等待分析")
+        self._set_conclusion_bar_style(center_color="#6e7681")
         self._conclusion_label.setStyleSheet(
-            "font-size: 16px; font-weight: bold; padding: 12px; color: #6e7681;"
+            "font-size: 16px; font-weight: bold; color: #6e7681;"
         )
         self._details_widget.setVisible(False)
 

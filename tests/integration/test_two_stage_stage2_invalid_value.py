@@ -28,8 +28,8 @@ def _make_reply(content_dict: dict) -> MagicMock:
     return reply
 
 
-def test_stage2_invalid_confidence(frame, exc_counter, pending_writer, assembler, exp_reader):
-    """Stage 2 has trade_confidence='ultra' (invalid type) → category 'c', count == 1."""
+def test_stage2_invalid_confidence(frame, pending_writer, assembler, exp_reader):
+    """Stage 2 has trade_confidence='ultra' (invalid type) → category 'c'."""
     bad_stage2 = copy.deepcopy(VALID_STAGE2)
     bad_stage2["decision"]["trade_confidence"] = "ultra"
 
@@ -45,7 +45,6 @@ def test_stage2_invalid_confidence(frame, exc_counter, pending_writer, assembler
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -62,9 +61,6 @@ def test_stage2_invalid_confidence(frame, exc_counter, pending_writer, assembler
     # Validation error category should be 'c' (invalid value)
     assert record.exception is not None
     assert record.exception["category"] == "c"
-
-    # consecutive_count incremented by 1
-    assert exc_counter.consecutive_count == 1
 
     # Stage1 succeeded, Stage2 failed
     assert OrchestratorEvent.Stage1Done in events

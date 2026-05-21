@@ -14,7 +14,6 @@ from pa_agent.gui.prompt_files_panel import PromptFilesPanel
 
 if TYPE_CHECKING:
     from pa_agent.config.settings import Settings
-    from pa_agent.orchestrator.exception_counter import ExceptionCounter
 
 
 class AISidebar(QWidget):
@@ -23,7 +22,6 @@ class AISidebar(QWidget):
     def __init__(
         self,
         api_key: str = "",
-        exc_counter: Optional["ExceptionCounter"] = None,
         settings: Optional["Settings"] = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -31,7 +29,7 @@ class AISidebar(QWidget):
         self._tabs = QTabWidget()
 
         self.stream = AIStreamPanel()
-        self.debug = DebugWidget(api_key=api_key, exc_counter=exc_counter)
+        self.debug = DebugWidget(api_key=api_key)
         self.prompt_files = PromptFilesPanel()
         self.decision = DecisionPanel()
         self.decision_tree = DecisionTreePanel()
@@ -54,6 +52,9 @@ class AISidebar(QWidget):
     TAB_STREAM = 0
     TAB_DECISION_TREE = 1
     TAB_DECISION_FLOW = 2
+    TAB_DECISION = 3
+    TAB_RAW = 4
+    TAB_DEBUG = 5
 
     def focus_stream(self) -> None:
         """Switch to the live AI output tab (index 0)."""
@@ -62,6 +63,10 @@ class AISidebar(QWidget):
     def focus_decision_flow_viz(self) -> None:
         """Switch to the decision flow visualization tab."""
         self._tabs.setCurrentIndex(self.TAB_DECISION_FLOW)
+
+    def focus_raw(self) -> None:
+        """Switch to the raw I/O tab (原始)."""
+        self._tabs.setCurrentIndex(self.TAB_RAW)
 
     def bind_settings(self, settings: Optional["Settings"]) -> None:
         self.stream.bind_settings(settings)

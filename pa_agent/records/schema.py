@@ -20,6 +20,7 @@ class RecordMeta(BaseModel):
     timeframe: str
     bar_count: int
     ai_provider: dict         # Sanitized provider config snapshot (no plaintext API key)
+    decision_stance: str = "conservative"  # conservative | balanced | aggressive | extreme_aggressive
 
 
 class AnalysisRecord(BaseModel):

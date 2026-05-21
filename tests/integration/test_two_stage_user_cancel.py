@@ -14,7 +14,7 @@ from pa_agent.util.threading import CancelToken, OrchestratorEvent
 from .conftest import VALID_STAGE1, make_reply
 
 
-def test_cancel_before_stage2(frame, exc_counter, pending_writer, assembler, exp_reader):
+def test_cancel_before_stage2(frame, pending_writer, assembler, exp_reader):
     """cancel_token set after stage1 succeeds → Cancelled event, no Stage2, count unchanged."""
     cancel_token = CancelToken()
 
@@ -35,7 +35,6 @@ def test_cancel_before_stage2(frame, exc_counter, pending_writer, assembler, exp
         assembler=assembler,
         router=route_strategy_files,
         validator=validator,
-        exc_counter=exc_counter,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )
@@ -53,9 +52,6 @@ def test_cancel_before_stage2(frame, exc_counter, pending_writer, assembler, exp
 
     # Stage2Started must NOT appear
     assert OrchestratorEvent.Stage2Started not in events
-
-    # consecutive_count must remain 0 (user cancel doesn't increment)
-    assert exc_counter.consecutive_count == 0
 
     # save_partial called with reason "user_cancelled"
     pending_writer.save_partial.assert_called_once()

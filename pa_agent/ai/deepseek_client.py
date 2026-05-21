@@ -47,6 +47,174 @@ class CancelledError(Exception):
     """Raised when a cancel_token is set before or during an API call."""
 
 
+def _is_deepseek_native(base_url: str) -> bool:
+    return "deepseek.com" in (base_url or "").lower()
+
+
+def _is_kkai_openai_proxy(base_url: str) -> bool:
+    """KKAI (api.kkone.vip) OpenAI-compatible gateway."""
+    url = (base_url or "").lower()
+    return "kkone.vip" in url
+
+
+def _is_packyapi(base_url: str) -> bool:
+    return "packyapi.com" in (base_url or "").lower()
+
+
+# Packy claude-officially returns 400 if max_tokens exceeds model output cap.
+_PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
+
+
+def _model_uses_claude_adaptive(model: str) -> bool:
+    """Claude models that require thinking.type=adaptive (not budget_tokens)."""
+    m = (model or "").lower()
+    return any(
+        token in m
+        for token in (
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        )
+    )
+
+
+_EFFORT_TO_ADAPTIVE_OUTPUT: dict[str, str] = {
+    "none": "low",
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "max": "max",
+    "xhigh": "max",
+}
+
+
+def _adaptive_output_effort(reasoning_effort: str | None) -> str:
+    key = (reasoning_effort or "medium").strip().lower()
+    return _EFFORT_TO_ADAPTIVE_OUTPUT.get(key, "medium")
+
+
+# Sent to OpenAI-compatible gateways; upstream may clamp below these values.
+_PRACTICAL_UNLIMITED_MAX_TOKENS = 999_999
+# Anthropic-style thinking requires budget_tokens < max_tokens.
+_PRACTICAL_UNLIMITED_THINKING_BUDGET = 999_998
+
+
+def _effort_budget_tokens(effort: str | None, *, max_output: int) -> int:
+    """Thinking budget; must stay below max_output (Anthropic/Packy rule)."""
+    del effort  # reserved for future per-effort tuning
+    return min(_PRACTICAL_UNLIMITED_THINKING_BUDGET, max(1024, max_output - 1))
+
+
+def _thinking_enabled(extra_body: dict[str, Any], effort: str | None) -> bool:
+    if extra_body:
+        return extra_body.get("thinking", {}).get("type") in ("enabled", "adaptive")
+    return effort is not None and effort != "none"
+
+
+def _packy_anthropic_messages_api(settings: AIProviderSettings) -> bool:
+    """Packy claude-officially uses Anthropic Messages API (no role=system in messages)."""
+    return _is_packyapi(settings.base_url) and "claude" in (settings.model or "").lower()
+
+
+def _prepare_chat_messages(
+    settings: AIProviderSettings,
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Hoist system turns to top-level ``system`` for Anthropic-native Packy routes."""
+    if not _packy_anthropic_messages_api(settings):
+        return messages, None
+    system_parts: list[str] = []
+    api_messages: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            text = msg.get("content", "")
+            if isinstance(text, str) and text.strip():
+                system_parts.append(text)
+            continue
+        api_messages.append(msg)
+    system_param = "\n\n".join(system_parts) if system_parts else None
+    return api_messages, system_param
+
+
+def _completion_max_tokens(
+    settings: AIProviderSettings,
+    *,
+    extra_body: dict[str, Any],
+    effort: str | None,
+) -> int:
+    """Total completion budget (thinking + content) for OpenAI-compatible APIs."""
+    del effort
+    cap = _PRACTICAL_UNLIMITED_MAX_TOKENS
+    if _is_packyapi(settings.base_url):
+        cap = _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
+    thinking_cfg = extra_body.get("thinking") or {}
+    if thinking_cfg.get("type") in ("enabled", "adaptive"):
+        return cap
+    return cap
+
+
+def _resolve_thinking_params(
+    settings: AIProviderSettings,
+    *,
+    thinking: bool | None,
+    reasoning_effort: str | None,
+) -> tuple[dict[str, Any], str | None]:
+    """Return (extra_body, reasoning_effort) for chat.completions.create."""
+    _thinking = thinking if thinking is not None else settings.thinking
+    _effort = reasoning_effort if reasoning_effort is not None else settings.reasoning_effort
+    model = settings.model or ""
+
+    if _is_deepseek_native(settings.base_url):
+        extra_body: dict[str, Any] = {
+            "thinking": {"type": "enabled" if _thinking else "disabled"},
+        }
+        return extra_body, _effort if _thinking else None
+
+    if not _thinking:
+        return {}, None
+
+    max_out = _completion_max_tokens(
+        settings, extra_body={}, effort=_effort
+    )
+
+    if _is_packyapi(settings.base_url) and "claude" in model.lower():
+        # Packy (e.g. claude-officially): budget_tokens only; reasoning_effort rejected.
+        budget = _effort_budget_tokens(_effort, max_output=max_out)
+        return (
+            {"thinking": {"type": "enabled", "budget_tokens": budget}},
+            None,
+        )
+
+    if _is_kkai_openai_proxy(settings.base_url):
+        # KKAI claude-opus-4-5: reasoning_effort -> 503 paprika_mode on some routes.
+        budget = _effort_budget_tokens(_effort, max_output=max_out)
+        return (
+            {"thinking": {"type": "enabled", "budget_tokens": budget}},
+            None,
+        )
+
+    if _model_uses_claude_adaptive(model):
+        # Yunwu / New-API style gateways: Opus 4.7+ needs adaptive thinking.
+        return (
+            {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": _adaptive_output_effort(_effort)},
+            },
+            _effort or "medium",
+        )
+
+    if "claude" in model.lower():
+        budget = _effort_budget_tokens(_effort, max_output=max_out)
+        return (
+            {"thinking": {"type": "enabled", "budget_tokens": budget}},
+            _effort or "medium",
+        )
+
+    # Other models on OpenAI-compatible proxies (o-series, deepseek-reasoner, etc.)
+    return {}, _effort or "medium"
+
+
 class DeepSeekClient:
     """Thin wrapper around the OpenAI-compatible DeepSeek API."""
 
@@ -73,20 +241,28 @@ class DeepSeekClient:
         if cancel_token is not None and cancel_token.is_set():
             raise CancelledError("Request cancelled before API call")
 
-        # Resolve settings
-        _thinking = thinking if thinking is not None else self._settings.thinking
-        _effort = reasoning_effort if reasoning_effort is not None else self._settings.reasoning_effort
-
-        # thinking switch via extra_body; reasoning_effort as top-level (DeepSeek docs)
-        extra_body: dict[str, Any] = {
-            "thinking": {"type": "enabled" if _thinking else "disabled"},
-        }
+        extra_body, _effort = _resolve_thinking_params(
+            self._settings, thinking=thinking, reasoning_effort=reasoning_effort
+        )
+        api_messages, system_param = _prepare_chat_messages(self._settings, messages)
+        if system_param:
+            extra_body = {**extra_body, "system": system_param}
+        _thinking_on = _thinking_enabled(extra_body, _effort)
+        _max_tokens = _completion_max_tokens(
+            self._settings, extra_body=extra_body, effort=_effort
+        )
 
         masked_key = mask_secret(self._settings.api_key)
         self._log.debug(
-            "DeepSeekClient.chat: model=%s thinking=%s effort=%s key=...%s msgs=%d",
-            self._settings.model, _thinking, _effort, masked_key[-4:] if len(masked_key) >= 4 else "****",
-            len(messages),
+            "DeepSeekClient.chat: model=%s thinking=%s effort=%s max_tokens=%s "
+            "system_hoisted=%s key=...%s msgs=%d",
+            self._settings.model,
+            _thinking_on,
+            _effort,
+            _max_tokens,
+            bool(system_param),
+            masked_key[-4:] if len(masked_key) >= 4 else "****",
+            len(api_messages),
         )
 
         if _OpenAI is None:
@@ -98,13 +274,19 @@ class DeepSeekClient:
         )
 
         t0 = time.monotonic()
+        create_kwargs: dict[str, Any] = {
+            "model": self._settings.model,
+            "messages": api_messages,
+            "timeout": timeout_s,
+            "max_tokens": _max_tokens,
+        }
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
+        if _effort is not None:
+            create_kwargs["reasoning_effort"] = _effort
         try:
             response = client.chat.completions.create(
-                model=self._settings.model,
-                messages=messages,
-                extra_body=extra_body,
-                reasoning_effort=_effort,
-                timeout=timeout_s,
+                **create_kwargs,
                 # IMPORTANT: do NOT add temperature, top_p, presence_penalty,
                 # frequency_penalty — they are incompatible with thinking mode.
             )
@@ -192,19 +374,26 @@ class DeepSeekClient:
         if cancel_token is not None and cancel_token.is_set():
             raise CancelledError("Request cancelled before API call")
 
-        _thinking = thinking if thinking is not None else self._settings.thinking
-        _effort = reasoning_effort if reasoning_effort is not None else self._settings.reasoning_effort
-
-        extra_body: dict[str, Any] = {
-            "thinking": {"type": "enabled" if _thinking else "disabled"},
-        }
+        extra_body, _effort = _resolve_thinking_params(
+            self._settings, thinking=thinking, reasoning_effort=reasoning_effort
+        )
+        api_messages, system_param = _prepare_chat_messages(self._settings, messages)
+        if system_param:
+            extra_body = {**extra_body, "system": system_param}
+        _thinking_on = _thinking_enabled(extra_body, _effort)
+        _max_tokens = _completion_max_tokens(
+            self._settings, extra_body=extra_body, effort=_effort
+        )
 
         self._log.info(
-            "DeepSeekClient.stream_chat: model=%s thinking=%s reasoning_effort=%s msgs=%d",
+            "DeepSeekClient.stream_chat: model=%s thinking=%s reasoning_effort=%s "
+            "max_tokens=%s system_hoisted=%s msgs=%d",
             self._settings.model,
-            _thinking,
+            _thinking_on,
             _effort,
-            len(messages),
+            _max_tokens,
+            bool(system_param),
+            len(api_messages),
         )
 
         if _OpenAI is None:
@@ -231,13 +420,16 @@ class DeepSeekClient:
             # rejects stream_options we retry without it.
             stream_kwargs: dict[str, Any] = {
                 "model": self._settings.model,
-                "messages": messages,
-                "extra_body": extra_body,
-                "reasoning_effort": _effort,
+                "messages": api_messages,
                 "timeout": timeout_s,
+                "max_tokens": _max_tokens,
                 "stream": True,
                 "stream_options": {"include_usage": True},
             }
+            if extra_body:
+                stream_kwargs["extra_body"] = extra_body
+            if _effort is not None:
+                stream_kwargs["reasoning_effort"] = _effort
 
             try:
                 stream = client.chat.completions.create(**stream_kwargs)
@@ -261,13 +453,16 @@ class DeepSeekClient:
                     details = getattr(u, "prompt_tokens_details", None)
                     cached_tokens = getattr(details, "cached_tokens", 0) if details else cached_tokens
 
-                if not chunk.choices:
+                if not getattr(chunk, "choices", None):
                     continue
 
                 request_id = request_id or (getattr(chunk, "id", "") or "")
                 model_name = model_name or (getattr(chunk, "model", "") or "")
 
-                delta = chunk.choices[0].delta
+                choice0 = chunk.choices[0]
+                delta = getattr(choice0, "delta", None)
+                if delta is None:
+                    continue
 
                 # Official pattern: reasoning_content is None when absent, not ""
                 # reasoning_content arrives first (thinking phase), then content
@@ -313,17 +508,25 @@ class DeepSeekClient:
 
         self._log.info(
             "DeepSeekClient.stream_chat done: latency=%.0f ms "
-            "reasoning_chars=%d content_chars=%d thinking=%s effort=%s",
+            "reasoning_chars=%d content_chars=%d deepseek_thinking=%s effort=%s",
             latency_ms,
             len(reasoning_content),
             len(content),
-            _thinking,
+            _thinking_on,
             _effort,
         )
-        if _thinking and len(reasoning_content) < 80 and len(content) > 0:
+        if not content.strip():
+            self._log.warning(
+                "API returned empty content (model=%s base_url=%s). "
+                "Check 原始 tab Raw Response; for KKAI/Claude ensure model ID and token group match.",
+                self._settings.model,
+                self._settings.base_url,
+            )
+        if _thinking_on and len(reasoning_content) < 80:
             self._log.warning(
                 "Thinking enabled but reasoning_content is very short (%d chars). "
-                "Check API model supports thinking mode and reasoning_effort=%s.",
+                "For KKAI/Claude use reasoning_effort (not DeepSeek extra_body); "
+                "check model ID, token group, and reasoning_effort=%s.",
                 len(reasoning_content),
                 _effort,
             )

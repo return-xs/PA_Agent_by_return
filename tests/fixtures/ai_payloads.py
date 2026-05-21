@@ -31,6 +31,8 @@ VALID_STAGE2_NO_ORDER = {
         "diagnosis_confidence_reasoning": "周期尚可",
         "trade_confidence": 35,
         "trade_confidence_reasoning": "无合格入场",
+        "estimated_win_rate": None,
+        "estimated_win_rate_reasoning": "未下单，无胜率估计",
         "key_factors": [],
         "watch_points": ["等待信号"],
         "risk_assessment": "观望",

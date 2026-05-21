@@ -248,6 +248,101 @@ def test_validator_accepts_normalized_user_stage2_snippet() -> None:
     assert isinstance(result, Ok)
 
 
+def test_partial_and_pending_answer_synonyms() -> None:
+    """Regression: AI used 部分 / 待确认 instead of enum answers."""
+    item_partial = {
+        "node_id": "9.2",
+        "question": "信号K线方向是否与计划方向一致？",
+        "answer": "部分",
+        "reason": "x",
+        "bar_range": "K1",
+    }
+    normalize_trace_item(item_partial)
+    assert item_partial["answer"] == "中性"
+
+    item_partial_fit = {
+        "node_id": "5.5",
+        "question": "是否为收缩台阶？",
+        "answer": "部分符合",
+        "reason": "x",
+        "bar_range": "K55-K14",
+    }
+    normalize_trace_item(item_partial_fit)
+    assert item_partial_fit["answer"] == "中性"
+
+    item_partial_yes = {
+        "node_id": "6.1",
+        "question": "是否存在清晰上下边界？",
+        "answer": "部分是",
+        "reason": "x",
+        "bar_range": "K10-K1",
+    }
+    normalize_trace_item(item_partial_yes)
+    assert item_partial_yes["answer"] == "中性"
+
+    item_channel = {
+        "node_id": "4.2",
+        "question": "通道方向？",
+        "answer": "上涨通道",
+        "reason": "x",
+        "bar_range": "K100-K14",
+    }
+    normalize_trace_item(item_channel)
+    assert item_channel["answer"] == "是"
+    assert item_channel.get("branch") == "bullish"
+
+    item_pending = {
+        "node_id": "9.5",
+        "question": "是否有跟随？",
+        "answer": "待确认",
+        "reason": "x",
+        "bar_range": "K1",
+    }
+    normalize_trace_item(item_pending)
+    assert item_pending["answer"] == "等待"
+
+
+def test_validator_accepts_partial_and_pending_answers() -> None:
+    payload = normalize_stage2(
+        {
+            **VALID_STAGE2,
+            "decision": {
+                **VALID_STAGE2["decision"],
+                "order_type": "不下单",
+                "order_direction": None,
+                "entry_price": None,
+                "take_profit_price": None,
+                "stop_loss_price": None,
+            },
+            "decision_trace": [
+                {
+                    "node_id": "9.2",
+                    "question": "信号K线方向是否与计划方向一致？",
+                    "answer": "部分",
+                    "reason": "方向大致一致但质量一般",
+                    "bar_range": "K1",
+                },
+                {
+                    "node_id": "9.5",
+                    "question": "是否有跟随？",
+                    "answer": "待确认",
+                    "reason": "尚无后续K线",
+                    "bar_range": "K1",
+                },
+            ],
+            "terminal": {
+                "node_id": "10.3",
+                "outcome": "wait",
+                "label": "等待",
+            },
+        }
+    )
+    result = JsonValidator().validate("stage2", json.dumps(payload, ensure_ascii=False))
+    assert isinstance(result, Ok)
+    assert result.obj["decision_trace"][0]["answer"] == "中性"
+    assert result.obj["decision_trace"][1]["answer"] == "等待"
+
+
 def test_validator_accepts_stage2_with_null_bar_range_and_forbid_phrase() -> None:
     """Regression: null bar_range, missing reason, §14 answer typo, node_id '14'."""
     payload = normalize_stage2(

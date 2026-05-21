@@ -1,7 +1,7 @@
 """DebugWidget — Tab 3 debug panel.
 
 Displays all AI turns in the current session with full prompt/response detail,
-copy buttons, JSON export, API-key masking, and a manual streak-reset button.
+copy buttons, JSON export, and API-key masking.
 
 Design reference: design.md §B.11 (Tab3)
 Tasks: 16.1, 16.2, 16.3, 16.4
@@ -25,22 +25,16 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
 
 from pa_agent.security.secret_store import mask_secret
 from pa_agent.config.paths import RECORDS_PENDING_DIR
-
-if TYPE_CHECKING:
-    from pa_agent.orchestrator.exception_counter import ExceptionCounter
 
 logger = logging.getLogger(__name__)
 
 
 class DebugWidget(QWidget):
     """Tab 3 debug panel.
-
-    streak_reset:
-        Emitted after the user clears the consecutive validation-error counter.
 
     Left side: QListWidget listing all turns (Stage1, Stage2, Followup-N …).
     Right side: 4 read-only QTextEdit blocks:
@@ -61,24 +55,17 @@ class DebugWidget(QWidget):
     ----------
     api_key:
         Plaintext API key to mask in all displayed text.  Defaults to "".
-    exc_counter:
-        Optional ExceptionCounter instance.  When provided the
-        "清除连续异常计数" button calls ``exc_counter.reset_streak()``.
     parent:
         Optional parent widget.
     """
 
-    streak_reset = pyqtSignal()
-
     def __init__(
         self,
         api_key: str = "",
-        exc_counter: Optional["ExceptionCounter"] = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._api_key = api_key
-        self._exc_counter = exc_counter
         self._turns: list[dict] = []
         self._setup_ui()
 
@@ -158,9 +145,12 @@ class DebugWidget(QWidget):
         btn_export.clicked.connect(self._export_turn_json)
         row.addWidget(btn_export)
 
-        btn_reset_streak = QPushButton("清除连续异常计数")
-        btn_reset_streak.clicked.connect(self._reset_streak)
-        row.addWidget(btn_reset_streak)
+        btn_copy_debug = QPushButton("复制调试信息")
+        btn_copy_debug.setToolTip(
+            "复制当前轮次的 Raw Response + Validation / Exception，便于粘贴给 AI 排查问题"
+        )
+        btn_copy_debug.clicked.connect(self._copy_debug_info)
+        row.addWidget(btn_copy_debug)
 
         row.addStretch()
         return row
@@ -191,6 +181,48 @@ class DebugWidget(QWidget):
         self._user_edit.clear()
         self._response_edit.clear()
         self._validation_edit.clear()
+
+    def focus_last_turn(self) -> None:
+        """Select the most recent turn in the list."""
+        if self._list_widget.count() > 0:
+            self._list_widget.setCurrentRow(self._list_widget.count() - 1)
+
+    def focus_exception_turn(self) -> bool:
+        """Select the ⚠ 异常 turn if present, else the last turn."""
+        for row in range(self._list_widget.count() - 1, -1, -1):
+            item = self._list_widget.item(row)
+            if item is not None and "异常" in item.text():
+                self._list_widget.setCurrentRow(row)
+                return True
+        self.focus_last_turn()
+        return False
+
+    def build_debug_bundle(self, row: int | None = None) -> str:
+        """Build text for bug reports: validation + raw response (+ optional prompts)."""
+        if row is None:
+            row = self._current_row()
+        if row < 0 or row >= len(self._turns):
+            return ""
+        turn = self._turns[row]
+        parts: list[str] = []
+        label = turn.get("label", f"Turn-{row}")
+        parts.append(f"=== {label} ===")
+        validation = turn.get("validation_info", "")
+        if validation:
+            parts.append("\n--- Validation / Exception ---\n")
+            parts.append(validation)
+        raw = turn.get("raw_response", {})
+        if raw:
+            parts.append("\n--- Raw Response ---\n")
+            parts.append(self._format_raw_response(raw))
+        system = turn.get("system_prompt", "")
+        user = turn.get("user_prompt", "")
+        if system or user:
+            parts.append("\n--- System Prompt ---\n")
+            parts.append(system)
+            parts.append("\n--- User Prompt ---\n")
+            parts.append(user)
+        return self._mask("\n".join(parts).strip())
 
     # ── Turn selection ────────────────────────────────────────────────────────
 
@@ -250,6 +282,20 @@ class DebugWidget(QWidget):
         from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(self._response_edit.toPlainText())
 
+    def _copy_debug_info(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        text = self.build_debug_bundle()
+        if not text:
+            QMessageBox.information(self, "复制调试信息", "没有可复制的调试内容，请先完成一轮分析。")
+            return
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(
+            self,
+            "已复制",
+            "已复制当前轮次的调试信息到剪贴板，可粘贴给 AI 协助排查。",
+        )
+
     def _export_turn_json(self) -> None:
         """Write the current turn's data to records/pending/<label>.debug-<row>.json."""
         row = self._current_row()
@@ -276,23 +322,3 @@ class DebugWidget(QWidget):
             logger.error("Failed to export debug turn: %s", exc)
             QMessageBox.critical(self, "导出失败", str(exc))
 
-    def _reset_streak(self) -> None:
-        """Show confirmation dialog and reset the exception streak on confirm."""
-        reply = QMessageBox.question(
-            self,
-            "清除连续异常计数",
-            "确定要将连续异常计数重置为 0 吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        if self._exc_counter is not None:
-            self._exc_counter.reset_streak()
-            self.streak_reset.emit()
-            logger.info("DebugWidget: exception streak manually cleared via UI")
-            QMessageBox.information(self, "已清除", "连续异常计数已重置为 0。")
-        else:
-            logger.warning("DebugWidget: reset_streak called but no exc_counter set")
-            QMessageBox.warning(self, "未配置", "未绑定异常计数器，无法重置。")

@@ -47,6 +47,8 @@ def _valid_stage2() -> dict:
             "diagnosis_confidence_reasoning": "周期位置存在歧义",
             "trade_confidence": 30,
             "trade_confidence_reasoning": "缺乏明确入场信号",
+            "estimated_win_rate": None,
+            "estimated_win_rate_reasoning": "未下单",
             "key_factors": ["unclear structure"],
             "watch_points": ["watch EMA20"],
             "risk_assessment": "high risk",
@@ -195,3 +197,10 @@ def test_markdown_fenced_json_is_accepted():
     raw = f"```json\n{json.dumps(_valid_stage1())}\n```"
     result = validator.validate("stage1", raw)
     assert isinstance(result, Ok)
+
+
+def test_stage2_json_with_trailing_fence_only_is_accepted():
+    """Bare JSON followed by closing ``` must not trigger Extra data (category a)."""
+    raw = json.dumps(_valid_stage2(), ensure_ascii=False, indent=2) + "\n```"
+    result = validator.validate("stage2", raw)
+    assert isinstance(result, Ok), f"Expected Ok, got {result}"
