@@ -20,8 +20,7 @@ from PyQt6.QtCore import QThread
 from PyQt6.QtWidgets import QApplication, QPlainTextEdit
 
 from pa_agent.app_context import AppContext
-from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
-from pa_agent.data.kline_buffer import KlineBuffer
+from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
 
 
@@ -87,34 +86,11 @@ def mock_data_source():
 
 
 @pytest.fixture
-def buffer():
-    buf = KlineBuffer(capacity=500)
-    # Pre-fill with some bars so snapshot works
-    for i in range(10, 0, -1):
-        bar = KlineBar(
-            seq=i,
-            ts_open=1_700_000_000_000 - i * 3_600_000,
-            open=2000.0,
-            high=2010.0,
-            low=1990.0,
-            close=2005.0,
-            volume=100.0,
-            closed=(i > 1),
-        )
-        if i == 1:
-            buf.update_forming(bar)
-        else:
-            buf.append(bar)
-    return buf
-
-
-@pytest.fixture
-def app_ctx(pending_writer, mock_data_source, buffer, tmp_path):
+def app_ctx(pending_writer, mock_data_source, tmp_path):
     """Build a minimal AppContext with mocked components."""
     ctx = AppContext()
     ctx.pending_writer = pending_writer
     ctx.data_source = mock_data_source
-    ctx.buffer = buffer
     return ctx
 
 
@@ -128,7 +104,7 @@ class TestSwitchMidAnalysis:
     """
 
     def test_worker_cancelled_within_100ms(
-        self, qtbot, app_ctx, pending_writer, mock_data_source, buffer
+        self, qtbot, app_ctx, pending_writer, mock_data_source
     ):
         """Switching symbol while stage-2 is running cancels the worker quickly."""
         from pa_agent.gui.main_window import MainWindow
@@ -168,7 +144,7 @@ class TestSwitchMidAnalysis:
         mock_client.stream_chat.side_effect = chat_dispatch
 
         # Wire up the orchestrator components
-        from pa_agent.ai.json_validator import JsonValidator
+        from tests.fixtures.validators import schema_test_validator
         from pa_agent.ai.router import route_strategy_files
 
         app_ctx.client = mock_client
@@ -176,7 +152,7 @@ class TestSwitchMidAnalysis:
         app_ctx.assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
         app_ctx.assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
         app_ctx.router = route_strategy_files
-        app_ctx.validator = JsonValidator()
+        app_ctx.validator = schema_test_validator()
         app_ctx.exp_reader = MagicMock()
         app_ctx.exp_reader.read_top5.return_value = []
 
@@ -192,7 +168,7 @@ class TestSwitchMidAnalysis:
             client=mock_client,
             assembler=app_ctx.assembler,
             router=route_strategy_files,
-            validator=JsonValidator(),
+            validator=schema_test_validator(),
             pending_writer=pending_writer,
             exp_reader=app_ctx.exp_reader,
         )
@@ -235,7 +211,7 @@ class TestSwitchMidAnalysis:
     ):
         """save_partial must be called with reason='user_switched' on symbol switch."""
         from pa_agent.gui.main_window import MainWindow, _AnalysisWorker
-        from pa_agent.ai.json_validator import JsonValidator
+        from tests.fixtures.validators import schema_test_validator
         from pa_agent.ai.router import route_strategy_files
         from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 
@@ -262,7 +238,7 @@ class TestSwitchMidAnalysis:
         app_ctx.assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
         app_ctx.assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
         app_ctx.router = route_strategy_files
-        app_ctx.validator = JsonValidator()
+        app_ctx.validator = schema_test_validator()
         app_ctx.exp_reader = MagicMock()
         app_ctx.exp_reader.read_top5.return_value = []
 
@@ -273,7 +249,7 @@ class TestSwitchMidAnalysis:
             client=mock_client,
             assembler=app_ctx.assembler,
             router=route_strategy_files,
-            validator=JsonValidator(),
+            validator=schema_test_validator(),
             pending_writer=pending_writer,
             exp_reader=app_ctx.exp_reader,
         )
@@ -349,7 +325,7 @@ class TestSwitchMidAnalysis:
     ):
         """cancel_token.is_set() must become True within 100ms of triggering switch."""
         from pa_agent.gui.main_window import MainWindow, _AnalysisWorker
-        from pa_agent.ai.json_validator import JsonValidator
+        from tests.fixtures.validators import schema_test_validator
         from pa_agent.ai.router import route_strategy_files
         from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 
@@ -376,7 +352,7 @@ class TestSwitchMidAnalysis:
         app_ctx.assembler.build_stage1.return_value = [{"role": "system", "content": "s1"}]
         app_ctx.assembler.build_stage2.return_value = [{"role": "system", "content": "s2"}]
         app_ctx.router = route_strategy_files
-        app_ctx.validator = JsonValidator()
+        app_ctx.validator = schema_test_validator()
         app_ctx.exp_reader = MagicMock()
         app_ctx.exp_reader.read_top5.return_value = []
 
@@ -387,7 +363,7 @@ class TestSwitchMidAnalysis:
             client=mock_client,
             assembler=app_ctx.assembler,
             router=route_strategy_files,
-            validator=JsonValidator(),
+            validator=schema_test_validator(),
             pending_writer=pending_writer,
             exp_reader=app_ctx.exp_reader,
         )

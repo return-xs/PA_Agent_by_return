@@ -6,7 +6,26 @@ import logging
 import re
 from typing import Any
 
+from pa_agent.ai.coherence_checks import _CYCLE_BRANCH_ALIASES
+from pa_agent.ai.decision_tree import load_decision_tree
+
+_PROCEED_FINAL_TOKENS = (
+    "进入阶段二",
+    "可进入阶段二",
+    "闸门通过",
+    "继续阶段二",
+    "进入策略",
+    "可继续分析",
+)
+
 logger = logging.getLogger(__name__)
+
+NormalizationMode = str  # "strict" | "lenient"
+
+# branch values that mean yes/no but not a cycle id (node 1.2 must use cycle_position).
+_GATE_12_GENERIC_BRANCHES = frozenset(
+    {"yes", "no", "y", "n", "是", "否", "true", "false", ""}
+)
 
 _BAR_RANGE_RE = re.compile(r"^K(\d+)-K(\d+)$", re.IGNORECASE)
 _SINGLE_BAR_RE = re.compile(r"^K(\d+)$", re.IGNORECASE)
@@ -143,15 +162,35 @@ _COMPOSITE_ANSWER_PAREN_RE = re.compile(
 
 
 def infer_max_bar_seq_from_trace(trace: list[Any]) -> int | None:
-    """Infer largest K index mentioned anywhere in the trace."""
+    """Infer largest K index mentioned in trace bar_range or reason text."""
     max_seq = 0
     for item in trace:
         if not isinstance(item, dict):
             continue
-        raw = str(item.get("bar_range", "") or "")
-        for m in re.finditer(r"K(\d+)", raw, re.IGNORECASE):
-            max_seq = max(max_seq, int(m.group(1)))
+        for field in ("bar_range", "reason"):
+            raw = str(item.get(field, "") or "")
+            for m in re.finditer(r"K(\d+)", raw, re.IGNORECASE):
+                max_seq = max(max_seq, int(m.group(1)))
     return max_seq or None
+
+
+def _comma_separated_bar_range(compact: str) -> str | None:
+    """Turn K7,K1 or K1、K7 into K7-K1 when two or more K refs are comma/顿号-separated."""
+    if "," not in compact and "、" not in compact:
+        return None
+    parts = re.split(r"[,，、]", compact)
+    seqs: list[int] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        m = _SINGLE_BAR_RE.match(part)
+        if m:
+            seqs.append(int(m.group(1)))
+    if len(seqs) < 2:
+        return None
+    older, newer = max(seqs), min(seqs)
+    return f"K{older}" if older == newer else f"K{older}-K{newer}"
 
 
 def fix_bar_range_string(text: str, *, default_max_seq: int | None = None) -> str:
@@ -166,20 +205,32 @@ def fix_bar_range_string(text: str, *, default_max_seq: int | None = None) -> st
         return "不适用"
 
     compact = raw.upper().replace(" ", "")
+    comma_range = _comma_separated_bar_range(compact)
+    if comma_range:
+        compact = comma_range.replace(" ", "")
     m = _BAR_RANGE_RE.match(compact)
     if m:
         a, b = int(m.group(1)), int(m.group(2))
         if a == b:
-            return f"K{a}"
+            capped = _cap_bar_seq(a, default_max_seq)
+            return f"K{capped}"
         if a < b:
             a, b = b, a
+        a = _cap_bar_seq(a, default_max_seq)
+        b = _cap_bar_seq(b, default_max_seq)
         return f"K{a}-K{b}"
 
     single = _SINGLE_BAR_RE.match(compact)
     if single:
-        return f"K{single.group(1)}"
+        return f"K{_cap_bar_seq(int(single.group(1)), default_max_seq)}"
 
     return raw
+
+
+def _cap_bar_seq(seq: int, max_seq: int | None) -> int:
+    if max_seq is not None and max_seq >= 1:
+        return max(1, min(seq, max_seq))
+    return seq
 
 
 def _branch_from_tail(per_node: dict[str, tuple[str, str]], tail: str) -> str | None:
@@ -283,6 +334,64 @@ def _coerce_bar_range(
     if fixed != str(br).strip():
         logger.debug("bar_range %s -> %s (node %s)", br, fixed, nid)
     item["bar_range"] = fixed
+    _expand_bar_range_for_reason_citations(item, default_max_seq=default_max_seq)
+
+
+def _bar_seqs_from_range_text(bar_range: str) -> set[int]:
+    text = (bar_range or "").strip().upper().replace(" ", "")
+    if not text or text in ("不适用", "—", "全局", "GLOBAL"):
+        return set()
+    m = _BAR_RANGE_RE.match(text)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        lo, hi = min(a, b), max(a, b)
+        return set(range(lo, hi + 1))
+    single = _SINGLE_BAR_RE.match(text)
+    if single:
+        return {int(single.group(1))}
+    return set()
+
+
+def _bar_seqs_from_reason_text(reason: str) -> set[int]:
+    return {int(m.group(1)) for m in re.finditer(r"K\s*(\d+)", reason or "", re.IGNORECASE)}
+
+
+def _expand_bar_range_for_reason_citations(
+    item: dict[str, Any],
+    *,
+    default_max_seq: int | None = None,
+) -> None:
+    """Widen bar_range when reason cites K-lines outside the declared window."""
+    reason = str(item.get("reason", "") or "")
+    br = str(item.get("bar_range", "") or "").strip()
+    cited = _bar_seqs_from_reason_text(reason)
+    if not cited or br in ("不适用", "—", "全局", "GLOBAL", ""):
+        return
+
+    allowed = _bar_seqs_from_range_text(br)
+    if not allowed:
+        return
+    if cited.issubset(allowed):
+        return
+
+    merged = allowed | cited
+    # Clip only when frame cap is known; always keep cited seqs from reason.
+    if default_max_seq and default_max_seq >= 1:
+        merged = {s for s in merged if 1 <= s <= default_max_seq} | cited
+        if not merged:
+            return
+
+    older, newer = max(merged), min(merged)
+    expanded = f"K{older}" if older == newer else f"K{older}-K{newer}"
+    if expanded != br:
+        logger.debug(
+            "bar_range expanded %s -> %s (node %s, cited=%s)",
+            br,
+            expanded,
+            item.get("node_id"),
+            sorted(cited),
+        )
+        item["bar_range"] = expanded
 
 
 def normalize_trace_item(
@@ -290,9 +399,11 @@ def normalize_trace_item(
     *,
     default_max_seq: int | None = None,
     prior_bar_range: str | None = None,
+    normalization_mode: NormalizationMode = "strict",
 ) -> None:
     """Mutate one trace item: answer + bar_range."""
     _ensure_trace_string_fields(item)
+    lenient = normalization_mode == "lenient"
     nid = str(item.get("node_id", "")).strip()
     if nid == "14":
         item["node_id"] = "14.1"
@@ -300,7 +411,7 @@ def normalize_trace_item(
     nid = str(item.get("node_id", ""))
 
     ans = str(item.get("answer", "")).strip()
-    if ans:
+    if ans and lenient:
         resolved = _resolve_trace_answer(nid, ans)
         if resolved is not None:
             new_ans, branch = resolved
@@ -325,7 +436,7 @@ def normalize_trace_item(
     _coerce_bar_range(
         item,
         default_max_seq=default_max_seq,
-        prior_bar_range=prior_bar_range,
+        prior_bar_range=prior_bar_range if lenient else None,
     )
 
 
@@ -333,17 +444,20 @@ def normalize_trace_list(
     trace: list[Any] | None,
     *,
     default_max_seq: int | None = None,
+    normalization_mode: NormalizationMode = "strict",
 ) -> list[Any] | None:
     if not isinstance(trace, list):
         return trace
     max_seq = default_max_seq or infer_max_bar_seq_from_trace(trace)
     last_br: str | None = None
+    lenient = normalization_mode == "lenient"
     for item in trace:
         if isinstance(item, dict):
             normalize_trace_item(
                 item,
                 default_max_seq=max_seq,
-                prior_bar_range=last_br,
+                prior_bar_range=last_br if lenient else None,
+                normalization_mode=normalization_mode,
             )
             br = str(item.get("bar_range", "") or "")
             if br and br not in ("不适用", "—", "-"):
@@ -351,11 +465,149 @@ def normalize_trace_list(
     return trace
 
 
-def normalize_stage1_traces(obj: dict[str, Any]) -> None:
-    normalize_trace_list(obj.get("gate_trace"))
+def _normalize_cycle_branch_value(raw: object) -> str | None:
+    if raw is None:
+        return None
+    key = str(raw).strip().lower()
+    if not key:
+        return None
+    return _CYCLE_BRANCH_ALIASES.get(key, key.replace(" ", "_"))
 
 
-def normalize_stage2_traces(obj: dict[str, Any]) -> None:
+def _sync_gate_12_branch_with_cycle(obj: dict[str, Any]) -> None:
+    """Node 1.2 branch must be the identified cycle, not yes/no."""
+    gate = obj.get("gate_trace")
+    cycle = _normalize_cycle_branch_value(obj.get("cycle_position"))
+    if not cycle or not isinstance(gate, list):
+        return
+    alt = _normalize_cycle_branch_value(obj.get("alternative_cycle_position"))
+
+    for item in gate:
+        if not isinstance(item, dict) or str(item.get("node_id", "")).strip() != "1.2":
+            continue
+        ans = str(item.get("answer", "")).strip()
+        br_raw = item.get("branch")
+        br = _normalize_cycle_branch_value(br_raw)
+        if br_raw is not None and br and br not in _GATE_12_GENERIC_BRANCHES:
+            if br != str(br_raw).strip().lower().replace(" ", "_"):
+                item["branch"] = br
+            return
+
+        if ans == "是" and (br is None or br in _GATE_12_GENERIC_BRANCHES):
+            item["branch"] = cycle
+            logger.debug("gate_trace 1.2 branch -> cycle_position %s", cycle)
+            return
+        if ans == "否" and (br is None or br in _GATE_12_GENERIC_BRANCHES):
+            item["branch"] = "unknown"
+            logger.debug("gate_trace 1.2 branch -> unknown (answer=否)")
+            return
+        if br and cycle and br not in (cycle, alt or ""):
+            if br in _GATE_12_GENERIC_BRANCHES:
+                item["branch"] = cycle if ans == "是" else "unknown"
+                logger.debug("gate_trace 1.2 generic branch %r -> %s", br_raw, item["branch"])
+        return
+
+
+def _canonical_tree_questions() -> dict[str, str]:
+    tree = load_decision_tree()
+    index = tree.get("node_index", {})
+    return {
+        str(nid): str(node.get("question", "") or "").strip()
+        for nid, node in index.items()
+        if str(node.get("question", "") or "").strip()
+    }
+
+
+def _canonical_gate_questions() -> dict[str, str]:
+    return _canonical_tree_questions()
+
+
+def _repair_stage2_decision_trace_questions(trace: list[Any]) -> None:
+    """Align decision_trace question text with the decision tree (format-only)."""
+    canonical_q = _canonical_tree_questions()
+    for item in trace:
+        if not isinstance(item, dict):
+            continue
+        nid = str(item.get("node_id", "") or "").strip()
+        if nid in canonical_q:
+            item["question"] = canonical_q[nid]
+
+
+def _repair_stage2_terminal(obj: dict[str, Any]) -> None:
+    """When 10.3 is 否 on a no-order path, terminal must cite node 10.3."""
+    trace = obj.get("decision_trace")
+    terminal = obj.get("terminal")
+    decision = obj.get("decision")
+    if not isinstance(trace, list) or not isinstance(terminal, dict):
+        return
+    if not isinstance(decision, dict) or decision.get("order_type") != "不下单":
+        return
+    if terminal.get("outcome") not in ("wait", "reject"):
+        return
+
+    for item in trace:
+        if not isinstance(item, dict) or str(item.get("node_id")) != "10.3":
+            continue
+        if item.get("answer") != "否":
+            return
+        old_nid = str(terminal.get("node_id", "") or "")
+        if old_nid != "10.3":
+            terminal["node_id"] = "10.3"
+            logger.debug(
+                "stage2 terminal.node_id %r -> 10.3 (10.3 answer=否, order_type=不下单)",
+                old_nid,
+            )
+        return
+
+
+def _repair_stage1_gate_trace(obj: dict[str, Any]) -> None:
+    """Format-only repairs so strict trace semantics pass on good-faith AI output."""
+    gate = obj.get("gate_trace")
+    if not isinstance(gate, list) or not gate:
+        return
+
+    canonical_q = _canonical_gate_questions()
+    for item in gate:
+        if not isinstance(item, dict):
+            continue
+        nid = str(item.get("node_id", "") or "").strip()
+        if nid in canonical_q:
+            item["question"] = canonical_q[nid]
+
+    if str(obj.get("gate_result", "")).lower() == "proceed":
+        last = gate[-1]
+        if isinstance(last, dict):
+            blob = str(last.get("reason", "") or "")
+            if not any(tok in blob for tok in _PROCEED_FINAL_TOKENS):
+                last["reason"] = (blob.rstrip("。") + "，闸门通过，可进入阶段二。").strip()
+
+
+def normalize_stage1_traces(
+    obj: dict[str, Any],
+    *,
+    normalization_mode: NormalizationMode = "strict",
+) -> None:
+    normalize_trace_list(
+        obj.get("gate_trace"),
+        normalization_mode=normalization_mode,
+    )
+    _repair_stage1_gate_trace(obj)
+    if normalization_mode == "lenient":
+        _sync_gate_12_branch_with_cycle(obj)
+
+
+def normalize_stage2_traces(
+    obj: dict[str, Any],
+    *,
+    normalization_mode: NormalizationMode = "strict",
+    default_max_seq: int | None = None,
+) -> None:
     trace = obj.get("decision_trace")
     if isinstance(trace, list):
-        normalize_trace_list(trace)
+        normalize_trace_list(
+            trace,
+            default_max_seq=default_max_seq,
+            normalization_mode=normalization_mode,
+        )
+        _repair_stage2_decision_trace_questions(trace)
+    _repair_stage2_terminal(obj)

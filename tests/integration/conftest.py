@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Shared test infrastructure for TwoStageOrchestrator integration tests."""
 from __future__ import annotations
 
@@ -6,108 +7,78 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
-# ── Valid JSON payloads ───────────────────────────────────────────────────────
+from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
+from tests.fixtures.gate_trace import make_bar_by_bar_summary, make_mandatory_gate_trace_proceed
 
-SAMPLE_GATE_TRACE = [
-    {
-        "node_id": "0.1",
-        "question": "是否看得懂当前市场？",
-        "answer": "是",
-        "action": "继续",
-        "reason": "结构清晰",
-        "section": "总原则",
-        "bar_range": "K100-K1",
-    },
-    {
-        "node_id": "1.2",
-        "question": "是否能识别市场周期？",
-        "answer": "是",
-        "action": "继续",
-        "reason": "normal_channel",
-        "section": "是否可以决策",
-        "bar_range": "K50-K1",
-    },
-    {
-        "node_id": "2.3",
-        "question": "当前方向是多头还是空头？",
-        "answer": "是",
-        "action": "继续",
-        "reason": "多头",
-        "branch": "bull",
-        "section": "多空方向判断",
-        "bar_range": "K30-K1",
-    },
-]
+SAMPLE_GATE_TRACE = make_mandatory_gate_trace_proceed(max_seq=5)
 
 SAMPLE_DECISION_TRACE = [
     {
         "node_id": "4.1",
-        "section": "通道",
-        "question": "是否出现有序波段结构？",
-        "answer": "是",
-        "reason": "HH+HL",
+        "section": "\u987a\u52bf\u901a\u9053",
+        "question": "\u662f\u5426\u4e3a\u987a\u52bf\u901a\u9053\u7ed3\u6784\uff1f",
+        "answer": "\u662f",
+        "reason": "HH+HL \u7ed3\u6784\u6e05\u6670\uff0c\u56de\u8c03\u6d45\u4e14\u8ddf\u968f\u826f\u597d\u3002",
         "skipped": False,
-        "bar_range": "K50-K1",
+        "bar_range": "K5-K3",
+    },
+    {
+        "node_id": "9.1",
+        "section": "\u4fe1\u53f7\u68d2",
+        "question": "\u6700\u65b0K\u7ebf\u662f\u5426\u4e3a\u5408\u683c\u4fe1\u53f7\u68d2\uff1f",
+        "answer": "\u662f",
+        "reason": "\u4fe1\u53f7\u68d2\u5b9e\u4f53\u9971\u6ee1\uff0c\u65b9\u5411\u4e0e\u591a\u5934\u5224\u65ad\u4e00\u81f4\u3002",
+        "skipped": False,
+        "bar_range": "K2",
     },
     {
         "node_id": "9.2",
-        "section": "入场信号",
-        "question": "信号K线方向是否与计划方向一致？",
-        "answer": "是",
-        "reason": "阳线",
+        "section": "\u4fe1\u53f7\u68d2",
+        "question": "\u4fe1\u53f7\u68d2\u662f\u5426\u5f97\u5230\u524d\u5e8fK\u7ebf\u786e\u8ba4\uff1f",
+        "answer": "\u662f",
+        "reason": "\u524d\u4e00\u6839K\u7ebf\u63d0\u4f9b\u65b9\u5411\u94fa\u57ab\uff0c\u4fe1\u53f7\u68d2\u7a81\u7834\u524d\u9ad8\u3002",
         "skipped": False,
         "bar_range": "K1",
     },
     {
         "node_id": "10.1",
-        "section": "风险收益",
-        "question": "是否能明确止损？",
-        "answer": "是",
-        "reason": "信号棒低点外",
+        "section": "\u5165\u573a\u68d2",
+        "question": "\u5165\u573a\u68d2\u662f\u5426\u5f3a\u52b2\uff1f",
+        "answer": "\u662f",
+        "reason": "\u5165\u573a\u68d2\u8ddf\u968f\u4fe1\u53f7\u68d2\uff0c\u6536\u76d8\u9760\u8fd1\u9ad8\u70b9\u3002",
         "skipped": False,
         "bar_range": "K1",
     },
     {
         "node_id": "10.2",
-        "section": "风险收益",
-        "question": "止损是否过大？",
-        "answer": "否",
-        "reason": "止损合理",
+        "section": "\u5165\u573a\u68d2",
+        "question": "\u662f\u5426\u6ee1\u8db3\u4e8c\u6b21\u5165\u573a\u6761\u4ef6\uff1f",
+        "answer": "\u662f",
+        "reason": "\u7a81\u7834\u6d4b\u8bd5\u540e\u56de\u8e29\u4e0d\u7834\u5173\u952e\u4f4e\u70b9\u3002",
         "skipped": False,
-        "bar_range": "K30-K1",
+        "bar_range": "K4-K2",
     },
     {
         "node_id": "10.3",
-        "section": "风险收益",
-        "question": "交易者方程是否通过？",
-        "answer": "是",
-        "reason": "RR 约 2:1",
+        "section": "\u4ea4\u6613\u8005\u65b9\u7a0b",
+        "question": "\u4ea4\u6613\u8005\u65b9\u7a0b\u662f\u5426\u901a\u8fc7\uff1f",
+        "answer": "\u662f",
+        "reason": "entry=2000 stop=1980 target=2050, RR about 2.5:1.",
         "skipped": False,
         "bar_range": "K1",
     },
     {
         "node_id": "11.2",
-        "section": "下单方式",
-        "question": "是通道回撤吗？",
-        "answer": "是",
-        "reason": "回撤限价",
+        "section": "\u6700\u7ec8\u786e\u8ba4",
+        "question": "\u662f\u5426\u6267\u884c\u8be5\u4ea4\u6613\u8ba1\u5212\uff1f",
+        "answer": "\u662f",
+        "reason": "\u95f8\u95e8\u4e0e\u9636\u6bb5\u4e8c\u51b3\u7b56\u6811\u8282\u70b9\u5747\u5df2\u901a\u8fc7\u3002",
         "skipped": False,
-        "bar_range": "K20-K1",
+        "bar_range": "K3-K1",
     },
 ]
 
-SAMPLE_BAR_BY_BAR_SUMMARY = [
-    {
-        "bar": "K1",
-        "role": "structure",
-        "bar_type": "trend_bull",
-        "context_effect": "strengthens_bull",
-        "follow_through": "pending",
-        "trapped_side": "none",
-        "reason": "最新K线支持多头结构",
-    },
-]
+SAMPLE_BAR_BY_BAR_SUMMARY = make_bar_by_bar_summary(5)
 
 VALID_STAGE1 = {
     "cycle_position": "normal_channel",
@@ -118,7 +89,7 @@ VALID_STAGE1 = {
     "key_signals": ["signal1"],
     "htf_context": "bullish trend",
     "entry_setup": "buy on pullback",
-    "strategy_files_needed": ["上涨通道分析识别.txt"],
+    "strategy_files_needed": ["\u4e0a\u6da8\u901a\u9053\u5206\u6790\u8bc6\u522b.txt"],
     "bar_by_bar_summary": SAMPLE_BAR_BY_BAR_SUMMARY,
     "gate_trace": SAMPLE_GATE_TRACE,
     "gate_result": "proceed",
@@ -146,18 +117,21 @@ SAMPLE_BAR_ANALYSIS = {
 
 VALID_STAGE2 = {
     "decision": {
-        "order_direction": "做多",
-        "order_type": "限价单",
-        "entry_price": 2000.0,
+        "order_direction": "\u505a\u591a",
+        "order_type": "\u7a81\u7834\u5355",
+        "entry_price": 2010.5,
         "take_profit_price": 2050.0,
-        "stop_loss_price": 1980.0,
+        "stop_loss_price": 1995.0,
+        "entry_basis_bar": "K2",
+        "entry_basis_extreme": "high",
+        "entry_rule": "long breakout above K2 high by 1 tick",
         "reasoning": "Strong bullish signal",
         "diagnosis_confidence": 75,
-        "diagnosis_confidence_reasoning": "周期位置明确，趋势方向清晰",
+        "diagnosis_confidence_reasoning": "stage1 diagnosis consistent",
         "trade_confidence": 70,
-        "trade_confidence_reasoning": "入场信号明确，风险回报比合理",
+        "trade_confidence_reasoning": "signal and entry bars strong",
         "estimated_win_rate": 55,
-        "estimated_win_rate_reasoning": "结构清晰，方程边际通过，取 55% 用于 10.3",
+        "estimated_win_rate_reasoning": "RR and structure support ~55%",
         "key_factors": ["factor1"],
         "watch_points": ["watch1"],
         "risk_assessment": "low risk",
@@ -173,12 +147,10 @@ VALID_STAGE2 = {
     "terminal": {
         "node_id": "11.2",
         "outcome": "trade",
-        "label": "10.3 已通过，通道回撤限价入场",
+        "label": "10.3 equation pass, breakout long",
     },
 }
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def make_reply(content_dict: dict) -> MagicMock:
     """Build a mock AIReply from a content dict."""
@@ -223,8 +195,6 @@ def make_frame() -> KlineFrame:
     )
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
 @pytest.fixture
 def frame():
     return make_frame()
@@ -240,6 +210,10 @@ def assembler():
     mock = MagicMock()
     mock.build_stage1.return_value = [{"role": "system", "content": "test"}]
     mock.build_stage2.return_value = [{"role": "system", "content": "test"}]
+    mock.build_stage2_continuation.return_value = [
+        {"role": "system", "content": "test"},
+        {"role": "user", "content": "test"},
+    ]
     return mock
 
 
@@ -247,4 +221,5 @@ def assembler():
 def exp_reader():
     mock = MagicMock()
     mock.read_top5.return_value = []
+    mock.read_for_stage2.return_value = []
     return mock

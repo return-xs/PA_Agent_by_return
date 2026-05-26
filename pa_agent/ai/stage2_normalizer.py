@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from pa_agent.ai.trace_normalize import normalize_stage2_traces
+from pa_agent.util.price_tick import normalize_breakout_entry_price
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +68,36 @@ def _normalize_next_bar_prediction(prediction: dict[str, Any]) -> None:
     # else: unparseable probabilities with unpredictable=False — leave for validator
 
 
-def normalize_stage2(obj: dict[str, Any]) -> dict[str, Any]:
+def _max_bar_seq_from_frame(kline_frame: Any) -> int | None:
+    bars = getattr(kline_frame, "bars", None) if kline_frame is not None else None
+    if not bars:
+        return None
+    seqs = [int(getattr(b, "seq", 0)) for b in bars if getattr(b, "seq", None)]
+    return max(seqs) if seqs else None
+
+
+def normalize_stage2(
+    obj: dict[str, Any],
+    *,
+    normalization_mode: str = "strict",
+    kline_frame: Any = None,
+) -> dict[str, Any]:
     """Return a copy of *obj* with decision_trace quirks corrected."""
     out = copy.deepcopy(obj)
-    normalize_stage2_traces(out)
+    frame_max = _max_bar_seq_from_frame(kline_frame)
+    normalize_stage2_traces(
+        out,
+        normalization_mode=normalization_mode,
+        default_max_seq=frame_max,
+    )
     decision = out.get("decision")
+    if isinstance(decision, dict) and normalize_breakout_entry_price(
+        decision, kline_frame=kline_frame
+    ):
+        logger.debug(
+            "breakout entry_price adjusted to basis extreme ± 1 tick (basis=%s)",
+            decision.get("entry_basis_bar"),
+        )
     if isinstance(decision, dict) and decision.get("order_type") == "不下单":
         # A no-order decision has no executable trade; tolerate model-provided
         # win-rate estimates in legacy payloads by clearing them before schema

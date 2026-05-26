@@ -16,7 +16,6 @@ class AppContext:
 
     # Data layer
     data_source: Any = None       # DataSource implementation
-    buffer: Any = None            # KlineBuffer
 
     # AI / orchestration layer
     client: Any = None            # DeepSeekClient
@@ -41,7 +40,6 @@ class AppContext:
         from pa_agent.util.event_bus import EventBus
         from pa_agent.security.secret_store import mask_secret
         from pa_agent.data.factory import create_data_source, normalize_data_source_kind
-        from pa_agent.data.kline_buffer import KlineBuffer
         from pa_agent.ai.deepseek_client import DeepSeekClient
         from pa_agent.ai.prompt_assembler import PromptAssembler
         from pa_agent.ai.router import route_strategy_files
@@ -62,7 +60,6 @@ class AppContext:
         event_bus = EventBus()
 
         # ── Data layer ────────────────────────────────────────────────────────
-        buffer = KlineBuffer(capacity=1000)
         ds_kind = normalize_data_source_kind(
             getattr(settings.general, "last_data_source", "mt5")
         )
@@ -99,10 +96,11 @@ class AppContext:
         assembler = PromptAssembler(
             prompt_dir=PROMPT_DIR,
             experience_reader=exp_reader,
+            prompt_settings=settings.prompt,
         )
 
         # ── Validator & router ────────────────────────────────────────────────
-        validator = JsonValidator()
+        validator = JsonValidator(settings)
         router = route_strategy_files
 
         # ── Pending writer ────────────────────────────────────────────────────
@@ -123,7 +121,6 @@ class AppContext:
             logger=app_logger,
             event_bus=event_bus,
             data_source=data_source,
-            buffer=buffer,
             client=client,
             assembler=assembler,
             router=router,

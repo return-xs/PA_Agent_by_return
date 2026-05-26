@@ -1,4 +1,4 @@
-"""E2E smoke test â€” free-chat session after two-stage analysis.
+"""E2E smoke test â€?free-chat session after two-stage analysis.
 
 Task 19.4
 """
@@ -9,10 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pa_agent.data.base import KlineBar
-from pa_agent.data.kline_buffer import KlineBuffer
 from pa_agent.app_context import AppContext
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.kline_bars import make_newest_first_bars
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 
 from tests.fixtures.ai_payloads import VALID_STAGE1, VALID_STAGE2_ORDER
@@ -48,23 +47,6 @@ def _make_chat_reply(content: str) -> MagicMock:
 
 def _make_ctx(tmp_path):
     """Build a minimal AppContext for the free-chat smoke test."""
-    buffer = KlineBuffer(capacity=500)
-    for i in range(10, 0, -1):
-        bar = KlineBar(
-            seq=i,
-            ts_open=1_700_000_000_000 - i * 3_600_000,
-            open=2000.0,
-            high=2010.0,
-            low=1990.0,
-            close=2005.0,
-            volume=100.0,
-            closed=(i > 1),
-        )
-        if i == 1:
-            buffer.update_forming(bar)
-        else:
-            buffer.append(bar)
-
     mock_client = MagicMock()
     mock_client.stream_chat.side_effect = [
         _make_reply(VALID_STAGE1),
@@ -79,11 +61,10 @@ def _make_ctx(tmp_path):
     pending_writer = MagicMock()
 
     ctx = AppContext()
-    ctx.buffer = buffer
     ctx.client = mock_client
     ctx.assembler = mock_assembler
     ctx.router = route_strategy_files
-    ctx.validator = JsonValidator()
+    ctx.validator = schema_test_validator()
     ctx.pending_writer = pending_writer
     ctx.exp_reader = MagicMock()
     ctx.exp_reader.read_top5.return_value = []
@@ -106,8 +87,8 @@ def test_free_chat_after_analysis(qtbot, tmp_path):
     window.show()
 
     window._ctx.settings.general.analysis_bar_count = 5
+    window._last_frame_ready_bars = make_newest_first_bars(9, with_forming=True)
 
-    # Run two-stage analysis
     window._on_submit_analysis()
 
     # Poll until the analysis is no longer in progress

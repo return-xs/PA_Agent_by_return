@@ -5,7 +5,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal["mt5", "tradingview"]
+DataSourceKind = Literal["mt5", "tradingview", "akshare"]
+NormalizationMode = Literal["strict", "lenient"]
 
 
 class AIProviderSettings(BaseModel):
@@ -19,6 +20,29 @@ class AIProviderSettings(BaseModel):
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "max"
     context_window: int = 2_000_000
+
+
+class PromptSettings(BaseModel):
+    """Prompt assembly tuning (accuracy-oriented defaults)."""
+    model_config = ConfigDict(extra="ignore")
+
+    #: When True, Stage 2 loads every strategy .txt (legacy/test behaviour).
+    stage2_load_full_strategy_library: bool = False
+    experience_max_entries: int = Field(default=3, ge=0, le=10)
+    experience_max_chars_per_entry: int = Field(default=400, ge=100, le=4000)
+    #: Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags).
+    stage1_inject_pattern_briefs: bool = True
+
+
+class ValidationSettings(BaseModel):
+    """Post-LLM validation behaviour."""
+    model_config = ConfigDict(extra="ignore")
+
+    normalization_mode: NormalizationMode = "strict"
+    trace_semantic_checks: bool = True
+    strict_bar_by_bar_features: bool = True
+    #: Do not inject stub gate_trace on truncated Stage 1 JSON.
+    disable_truncation_repair: bool = True
 
 
 class GeneralSettings(BaseModel):
@@ -52,6 +76,8 @@ class GeneralSettings(BaseModel):
     def _coerce_legacy_data_source(cls, v: object) -> object:
         if v == "yfinance":
             return "mt5"
+        if v in ("adata", "a_share"):
+            return "akshare"
         return v
 
     @field_validator("decision_flow_default_zoom_pct", mode="before")
@@ -68,6 +94,8 @@ class Settings(BaseModel):
 
     provider: AIProviderSettings = Field(default_factory=AIProviderSettings)
     general: GeneralSettings = Field(default_factory=GeneralSettings)
+    prompt: PromptSettings = Field(default_factory=PromptSettings)
+    validation: ValidationSettings = Field(default_factory=ValidationSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:

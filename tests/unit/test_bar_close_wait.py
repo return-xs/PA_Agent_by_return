@@ -1,9 +1,13 @@
 """Tests for forming-bar close detection."""
 from __future__ import annotations
 
+import time
+
 from pa_agent.data.bar_close_wait import (
     current_forming_ts,
     forming_bar_has_closed,
+    has_forming_bar_at_head,
+    is_bar_still_forming,
     seconds_until_bar_closes,
     timeframe_to_seconds,
 )
@@ -37,9 +41,29 @@ def test_seconds_until_bar_closes() -> None:
 
 
 def test_forming_bar_has_closed_when_ts_changes() -> None:
-    waited = 1000
-    before = [_bar(1000), _bar(900)]
-    after = [_bar(2000), _bar(1000)]
-    assert current_forming_ts(before) == 1000
-    assert not forming_bar_has_closed(waited, before)
-    assert forming_bar_has_closed(waited, after)
+    now_ms = int(time.time() * 1000)
+    waited = now_ms - 120_000
+    before = [_bar(waited), _bar(waited - 300_000)]
+    after = [_bar(now_ms), _bar(waited)]
+    assert current_forming_ts(before, "5m", now_ms=now_ms - 60_000) == waited
+    assert not forming_bar_has_closed(waited, before, "5m", now_ms=now_ms - 60_000)
+    assert forming_bar_has_closed(waited, after, "5m", now_ms=now_ms)
+
+
+def test_stale_unclosed_flag_after_bar_period_not_forming() -> None:
+    """TradingView-style closed=False but bar period ended → treat as closed."""
+    ts_open = 1_700_000_000_000
+    now_ms = ts_open + 20 * 60 * 1000  # 20m after open on 15m bar
+    head = _bar(ts_open)
+    assert not is_bar_still_forming(head, "15m", now_ms=now_ms)
+    assert not has_forming_bar_at_head([head], "15m", now_ms=now_ms)
+    assert current_forming_ts([head], "15m", now_ms=now_ms) is None
+    assert forming_bar_has_closed(ts_open, [head], "15m", now_ms=now_ms)
+
+
+def test_active_intraday_bar_still_forming() -> None:
+    ts_open = 1_700_000_000_000
+    now_ms = ts_open + 5 * 60 * 1000
+    head = _bar(ts_open)
+    assert is_bar_still_forming(head, "15m", now_ms=now_ms)
+    assert has_forming_bar_at_head([head], "15m", now_ms=now_ms)

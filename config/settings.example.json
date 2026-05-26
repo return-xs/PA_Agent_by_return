@@ -23,5 +23,17 @@
     "stream_pane_font_pt": 11,
     "chart_seq_label_font_pt": 7,
     "auto_resume_chart_after_analysis": true
+  },
+  "prompt": {
+    "stage2_load_full_strategy_library": false,
+    "experience_max_entries": 3,
+    "experience_max_chars_per_entry": 400,
+    "stage1_inject_pattern_briefs": true
+  },
+  "validation": {
+    "normalization_mode": "strict",
+    "trace_semantic_checks": true,
+    "strict_bar_by_bar_features": true,
+    "disable_truncation_repair": true
   }
 }

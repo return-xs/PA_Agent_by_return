@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 from pa_agent.data.base import KlineFrame
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
@@ -27,7 +27,7 @@ from .conftest import (
 _PREDICTION_BULLISH = {
     "direction": "bullish",
     "probabilities": {"bullish": 60, "bearish": 30, "neutral": 10},
-    "reasoning": "多头趋势明确，阳线概率最高，结构支持继续上行。",
+    "reasoning": "???????????????????????",
     "unpredictable": False,
     "features_used": ["stage1_diagnosis"],
 }
@@ -35,7 +35,7 @@ _PREDICTION_BULLISH = {
 _PREDICTION_UNPREDICTABLE = {
     "direction": None,
     "probabilities": None,
-    "reasoning": "K线数据不足，无法做出可靠的方向预测。",
+    "reasoning": "K??????????????????",
     "unpredictable": True,
     "features_used": ["stage1_diagnosis"],
 }
@@ -77,13 +77,13 @@ def exp_reader():
     return mock
 
 
-# ── Tests ────────────────────────────────────────────────────────────────────
+# ?? Tests ????????????????????????????????????????????????????????????????????
 
 
 def test_orchestrator_passes_through_prediction(
     frame, pending_writer, assembler, exp_reader
 ):
-    """AI returns prediction → record.stage2_decision contains it (R1.1)."""
+    """AI returns prediction ? record.stage2_decision contains it (R1.1)."""
     client = MagicMock()
     stage2_with_pred = _make_stage2_with_prediction(_PREDICTION_BULLISH)
     client.stream_chat.side_effect = [
@@ -91,7 +91,7 @@ def test_orchestrator_passes_through_prediction(
         make_reply(stage2_with_pred),
     ]
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -123,7 +123,7 @@ def test_orchestrator_calls_client_twice_max(
         make_reply(_make_stage2_with_prediction(_PREDICTION_BULLISH)),
     ]
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -140,17 +140,26 @@ def test_orchestrator_calls_client_twice_max(
 def test_short_circuit_emits_unpredictable(
     frame, pending_writer, assembler, exp_reader
 ):
-    """gate_result=wait → short-circuit response with unpredictable prediction (R4.6)."""
+    """gate_result=wait ? short-circuit response with unpredictable prediction (R4.6)."""
     wait_stage1 = json.loads(json.dumps(VALID_STAGE1))
     wait_stage1["gate_result"] = "wait"
+    wait_stage1["cycle_position"] = "unknown"
     wait_stage1["gate_trace"] = [
-        {"node_id": "1.2", "question": "q", "answer": "否", "reason": "r"},
+        {
+            "node_id": "1.2",
+            "question": "\u662f\u5426\u80fd\u8bc6\u522b\u5e02\u573a\u5468\u671f\uff1f",
+            "answer": "\u5426",
+            "action": "\u7b49\u5f85",
+            "reason": "\u65e0\u6cd5\u8bc6\u522b\u5468\u671f",
+            "bar_range": "K5-K1",
+            "branch": "unknown",
+        },
     ]
 
     client = MagicMock()
     client.stream_chat.return_value = make_reply(wait_stage1)
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -176,7 +185,7 @@ def test_log_emits_prediction_line(
         make_reply(_make_stage2_with_prediction(_PREDICTION_BULLISH)),
     ]
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -197,14 +206,14 @@ def test_log_emits_prediction_line(
 def test_save_full_round_trip(
     frame, pending_writer, assembler, exp_reader
 ):
-    """Write → reload → prediction fields preserved (R9.4)."""
+    """Write ? reload ? prediction fields preserved (R9.4)."""
     client = MagicMock()
     client.stream_chat.side_effect = [
         make_reply(VALID_STAGE1),
         make_reply(_make_stage2_with_prediction(_PREDICTION_BULLISH)),
     ]
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -252,7 +261,7 @@ def test_cancel_no_prediction_required(
     cancel_token.set()  # Pre-cancel
 
     client = MagicMock()
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -270,7 +279,7 @@ def test_cancel_no_prediction_required(
 def test_network_error_no_prediction_required(
     frame, pending_writer, assembler, exp_reader
 ):
-    """Network error → next_bar_prediction missing is not an extra failure (R7.5)."""
+    """Network error ? next_bar_prediction missing is not an extra failure (R7.5)."""
     try:
         import openai
         err = openai.APIConnectionError(request=MagicMock())
@@ -280,7 +289,7 @@ def test_network_error_no_prediction_required(
     client = MagicMock()
     client.stream_chat.side_effect = err
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,
@@ -294,5 +303,5 @@ def test_network_error_no_prediction_required(
     # Record should have an exception, but no prediction
     assert record.exception is not None
     pred = record.stage2_decision.get("next_bar_prediction") if isinstance(record.stage2_decision, dict) else None
-    # prediction may be None — that's fine
+    # prediction may be None ? that's fine
     assert pred is None or isinstance(pred, dict)

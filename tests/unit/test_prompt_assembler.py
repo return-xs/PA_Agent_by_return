@@ -45,6 +45,7 @@ def assembler(tmp_path: Path) -> PromptAssembler:
         "提示词大纲_人设与思维方式.txt",
         "市场诊断框架.txt",
         "二元决策.txt",
+        "二元决策_闸门.txt",
         "文件16-K线信号识别.txt",
         "逐棒分析检查单.txt",
         "文件17-止损和止盈与仓位管理.txt",
@@ -78,25 +79,22 @@ def test_stage1_system_prompt_order(assembler: PromptAssembler):
     system = messages[0]["content"]
     user = messages[1]["content"]
     pos_persona = system.find("提示词大纲_人设与思维方式")
-    pos_binary_sys = system.find("二元决策")
+    pos_binary_sys = system.find("二元决策_闸门")
     assert pos_persona >= 0
-    assert 0 <= pos_persona < pos_binary_sys, "Binary tree should follow persona in system"
+    assert 0 <= pos_persona < pos_binary_sys, "Gate-only binary tree should follow persona in system"
     assert "市场诊断框架" not in system
+    assert "## 3." not in system, "Stage 1 system must not include §3+ execution chapters"
 
     pos_diag = user.find("市场诊断框架")
     pos_signal = user.find("文件16-K线信号识别")
     pos_bar_by_bar = user.find("逐棒分析检查单")
-    assert "[CONTENT OF 二元决策.txt]" not in user, (
-        "Full binary tree file is only in system (shared with stage 2)"
-    )
-    assert "[CONTENT OF 二元决策.txt]" in system
+    assert "是否为尖峰 / 极速行情" not in system
+    assert "[CONTENT OF 二元决策_闸门.txt]" in system
+    assert "[CONTENT OF 二元决策.txt]" not in system
     assert 0 <= pos_diag < pos_signal, "Stage 1 user task files are out of order"
     assert 0 <= pos_signal < pos_bar_by_bar, "Bar-by-bar checklist should follow signal file"
-    assert "文件18-突破失败与突破测试" in user
-    assert "文件19-H1H2-L1L2计数" in user
-    assert "文件20-AlwaysIn与20GB" in user
-    assert "文件21-铁丝网与无交易环境" in user
-    assert "文件22-信号失败后的磁力位" in user
+    assert "文件18-突破失败与突破测试" not in user
+    assert "文件13-窄通道与宽通道策略" not in user
 
 
 def test_stage1_user_prompt_contains_required_fields(assembler: PromptAssembler):
@@ -162,20 +160,23 @@ def test_stage2_user_prompt_contains_stage1_json(assembler: PromptAssembler):
     assert "bearish" in user
 
 
-def test_stage2_user_prompt_always_includes_full_strategy_pack(
+def test_stage2_user_prompt_uses_routed_strategy_only_by_default(
     assembler: PromptAssembler,
 ):
-    """Accuracy-first mode loads all strategy references in Stage 2."""
+    """Default Stage 2 loads router output + base files, not the full strategy pack."""
     frame = _make_frame()
-    messages = assembler.build_stage2(frame, {}, [], [])
+    routed = ["上涨通道分析识别.txt", "上涨通道交易策略.txt"]
+    messages = assembler.build_stage2(
+        frame,
+        {"cycle_position": "normal_channel", "direction": "bullish", "gate_result": "proceed"},
+        routed,
+        [],
+    )
     user = messages[1]["content"]
     assert "上涨通道分析识别" in user
-    assert "下跌通道分析识别" in user
-    assert "极速上涨分析识别" in user
-    assert "极速下跌分析识别" in user
-    assert "震荡区间分析识别" in user
-    assert "文件18-突破失败与突破测试" in user
-    assert "文件22-信号失败后的磁力位" in user
+    assert "文件17-止损和止盈与仓位管理" in user
+    assert "下跌通道分析识别" not in user
+    assert "极速下跌分析识别" not in user
 
 
 def test_stage1_output_reminder_present(assembler: PromptAssembler):
@@ -277,16 +278,19 @@ def test_stage2_continuation_omits_stage1_user_prompt(assembler: PromptAssembler
         stage1_messages=stage1_messages,
         stage1_reply_content='{"cycle_position":"spike","direction":"bearish"}',
         stage1_json=stage1_json,
-        strategy_files=["上涨通道分析识别.txt"],
+        strategy_files=["下跌通道分析识别.txt", "下跌通道交易策略.txt"],
         experience_entries=[],
     )
 
     assert [m["role"] for m in messages] == ["system", "assistant", "user"]
-    assert messages[0]["content"] == stage1_messages[0]["content"]
+    assert messages[0]["content"] != stage1_messages[0]["content"]
+    assert "二元决策.txt" in messages[0]["content"] or "## 3." in messages[0]["content"]
+    assert "二元决策_闸门.txt" in stage1_messages[0]["content"] or "§0" in stage1_messages[0]["content"]
     assert "cycle_position" in messages[1]["content"]
     assert "K线数据" in messages[2]["content"]
     assert "沿用上一轮阶段一用户消息中的同一份 K线数据" not in messages[2]["content"]
-    assert "上涨通道分析识别" in messages[2]["content"]
+    assert "下跌通道分析识别" in messages[2]["content"]
+    assert "上涨通道分析识别" not in messages[2]["content"]
     assert "【最后一步·必做】" in messages[2]["content"]
 
 

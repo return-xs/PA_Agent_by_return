@@ -210,6 +210,21 @@ STAGE1_SCHEMA: dict = {
             "type": "string",
             "enum": ["proceed", "wait", "unknown"],
         },
+        "incremental_delta": {
+            "type": "object",
+            "properties": {
+                "new_closed_bars": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "changed_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "summary": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
     },
     "allOf": [
         # spike only requires spike_stage (micro_channel may keep spike_stage null)

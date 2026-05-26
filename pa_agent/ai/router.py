@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pa_agent.ai.pattern_routing import merge_detected_patterns
+
 logger = logging.getLogger(__name__)
 
 # ── File name constants ────────────────────────────────────────────────────────
@@ -88,10 +90,7 @@ def route_strategy_files(stage1_json: dict[str, Any]) -> list[str]:
     """
     cp = stage1_json.get("cycle_position", "unknown")
     direction = stage1_json.get("direction", "neutral")
-    patterns = [
-        str(p).strip().lower()
-        for p in (stage1_json.get("detected_patterns", []) or [])
-    ]
+    patterns = merge_detected_patterns(stage1_json)
     spike_stage = stage1_json.get("spike_stage")
     alternative_cp = stage1_json.get("alternative_cycle_position")
 

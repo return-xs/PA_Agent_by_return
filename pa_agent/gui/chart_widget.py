@@ -92,6 +92,11 @@ class ChartWidget(pg.PlotWidget):
 
     def set_frame(self, frame: "KlineFrame", *, fit_view: bool = False) -> None:
         """Cache the latest KlineFrame; actual redraw happens on the timer."""
+        if self._should_skip_redraw(frame):
+            self._latest_frame = frame
+            if fit_view or not self._first_frame_fitted:
+                self._fit_on_next_render = True
+            return
         self._latest_frame = frame
         if fit_view or not self._first_frame_fitted:
             self._fit_on_next_render = True
@@ -99,11 +104,27 @@ class ChartWidget(pg.PlotWidget):
 
     def set_frame_now(self, frame: "KlineFrame", *, fit_view: bool = False) -> None:
         """Apply *frame* to the chart immediately (bypass 30 Hz throttle)."""
+        if self._should_skip_redraw(frame):
+            self._latest_frame = frame
+            if fit_view and not self._first_frame_fitted:
+                self.fit_view()
+            return
         self._latest_frame = frame
         self._dirty = False
         self._render_frame(frame)
         if fit_view:
             self.fit_view()
+
+    def _should_skip_redraw(self, frame: "KlineFrame") -> bool:
+        """Skip repaint when the screen already shows the same closed-only snapshot."""
+        from pa_agent.data.snapshot import frame_is_pure_closed, frames_equal_for_chart
+
+        current = self._latest_frame
+        if current is None or not self._candle_items:
+            return False
+        if not frame_is_pure_closed(current) or not frame_is_pure_closed(frame):
+            return False
+        return frames_equal_for_chart(current, frame)
 
     def request_fit_on_next_render(self) -> None:
         """Zoom/pan to fit the next rendered frame (or now if one is already shown)."""

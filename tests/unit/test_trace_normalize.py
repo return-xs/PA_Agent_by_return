@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 
-from pa_agent.ai.json_validator import JsonValidator, Ok
+from pa_agent.ai.json_validator import Ok
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.stage2_normalizer import normalize_stage2
 from pa_agent.ai.trace_normalize import (
     fix_bar_range_string,
+    normalize_stage2_traces,
     normalize_trace_item,
     normalize_trace_list,
 )
@@ -18,11 +20,38 @@ def test_fix_reversed_bar_range() -> None:
     assert fix_bar_range_string("K50-K1") == "K50-K1"
 
 
+def test_fix_comma_separated_bar_range() -> None:
+    assert fix_bar_range_string("K1,K7") == "K7-K1"
+    assert fix_bar_range_string("K7、K1") == "K7-K1"
+
+
+def test_expand_bar_range_when_reason_cites_older_k() -> None:
+    """Regression: 9.4 reason 'K4之后' with bar_range K2 -> K4-K2."""
+    item = {
+        "node_id": "9.4",
+        "answer": "是",
+        "reason": "此为K4之后第一次明确反弹做空信号(L1)，非二次入场。",
+        "bar_range": "K2",
+    }
+    normalize_trace_item(item, default_max_seq=20, normalization_mode="strict")
+    assert item["bar_range"] == "K4-K2"
+
+
+def test_global_bar_range_strict_uses_inferred_max() -> None:
+    trace = [
+        {"node_id": "10.1", "answer": "是", "bar_range": "K20-K1"},
+        {"node_id": "14.1", "answer": "否", "bar_range": "全局"},
+    ]
+    normalize_trace_list(trace, normalization_mode="strict")
+    assert trace[1]["bar_range"] == "K20-K1"
+
+
 def test_global_bar_range_uses_trace_max() -> None:
     item = {"node_id": "14.1", "answer": "通过", "bar_range": "全局"}
     normalize_trace_item(
         item,
         default_max_seq=100,
+        normalization_mode="lenient",
     )
     assert item["answer"] == "是"
     assert item["bar_range"] == "K100-K1"
@@ -36,7 +65,7 @@ def test_node_63_composite_boundary_answer() -> None:
         "reason": "x",
         "bar_range": "K5-K1",
     }
-    normalize_trace_item(item)
+    normalize_trace_item(item, normalization_mode="lenient")
     assert item["answer"] == "是"
     assert item["branch"] == "lower"
 
@@ -49,7 +78,7 @@ def test_node_62_trending_tr_answer() -> None:
         "reason": "x",
         "bar_range": "K25-K1",
     }
-    normalize_trace_item(item)
+    normalize_trace_item(item, normalization_mode="lenient")
     assert item["answer"] == "是"
     assert item["branch"] == "trending_tr"
 
@@ -62,7 +91,7 @@ def test_node_42_directional_answer() -> None:
         "reason": "x",
         "bar_range": "K100-K1",
     }
-    normalize_trace_item(item)
+    normalize_trace_item(item, normalization_mode="lenient")
     assert item["answer"] == "是"
     assert item["branch"] == "bearish"
 
@@ -103,7 +132,7 @@ def test_validator_accepts_user_trending_tr_trace() -> None:
             },
         }
     )
-    result = JsonValidator().validate("stage2", json.dumps(payload, ensure_ascii=False))
+    result = schema_test_validator().validate("stage2", json.dumps(payload, ensure_ascii=False))
     assert isinstance(result, Ok)
 
 
@@ -126,7 +155,7 @@ def test_null_bar_range_on_skipped_nodes() -> None:
             "bar_range": None,
         },
     ]
-    normalize_trace_list(trace, default_max_seq=48)
+    normalize_trace_list(trace, default_max_seq=48, normalization_mode="lenient")
     assert trace[0]["bar_range"] == "不适用"
     assert trace[1]["bar_range"] == "不适用"
 
@@ -148,7 +177,7 @@ def test_null_bar_range_inherits_prior_range() -> None:
             "bar_range": None,
         },
     ]
-    normalize_trace_list(trace, default_max_seq=48)
+    normalize_trace_list(trace, default_max_seq=48, normalization_mode="lenient")
     assert trace[1]["bar_range"] == "K48-K1"
 
 
@@ -197,7 +226,7 @@ def test_validator_accepts_user_payload_with_null_bar_ranges() -> None:
             },
         }
     )
-    result = JsonValidator().validate("stage2", json.dumps(payload, ensure_ascii=False))
+    result = schema_test_validator().validate("stage2", json.dumps(payload, ensure_ascii=False))
     assert isinstance(result, Ok)
     assert result.obj["decision_trace"][1]["bar_range"] == "不适用"
 
@@ -244,7 +273,7 @@ def test_validator_accepts_normalized_user_stage2_snippet() -> None:
             },
         }
     )
-    result = JsonValidator().validate("stage2", json.dumps(base, ensure_ascii=False))
+    result = schema_test_validator().validate("stage2", json.dumps(base, ensure_ascii=False))
     assert isinstance(result, Ok)
 
 
@@ -257,7 +286,7 @@ def test_partial_and_pending_answer_synonyms() -> None:
         "reason": "x",
         "bar_range": "K1",
     }
-    normalize_trace_item(item_partial)
+    normalize_trace_item(item_partial, normalization_mode="lenient")
     assert item_partial["answer"] == "中性"
 
     item_partial_fit = {
@@ -267,7 +296,7 @@ def test_partial_and_pending_answer_synonyms() -> None:
         "reason": "x",
         "bar_range": "K55-K14",
     }
-    normalize_trace_item(item_partial_fit)
+    normalize_trace_item(item_partial_fit, normalization_mode="lenient")
     assert item_partial_fit["answer"] == "中性"
 
     item_partial_yes = {
@@ -277,7 +306,7 @@ def test_partial_and_pending_answer_synonyms() -> None:
         "reason": "x",
         "bar_range": "K10-K1",
     }
-    normalize_trace_item(item_partial_yes)
+    normalize_trace_item(item_partial_yes, normalization_mode="lenient")
     assert item_partial_yes["answer"] == "中性"
 
     item_channel = {
@@ -287,7 +316,7 @@ def test_partial_and_pending_answer_synonyms() -> None:
         "reason": "x",
         "bar_range": "K100-K14",
     }
-    normalize_trace_item(item_channel)
+    normalize_trace_item(item_channel, normalization_mode="lenient")
     assert item_channel["answer"] == "是"
     assert item_channel.get("branch") == "bullish"
 
@@ -298,7 +327,7 @@ def test_partial_and_pending_answer_synonyms() -> None:
         "reason": "x",
         "bar_range": "K1",
     }
-    normalize_trace_item(item_pending)
+    normalize_trace_item(item_pending, normalization_mode="lenient")
     assert item_pending["answer"] == "等待"
 
 
@@ -337,7 +366,7 @@ def test_validator_accepts_partial_and_pending_answers() -> None:
             },
         }
     )
-    result = JsonValidator().validate("stage2", json.dumps(payload, ensure_ascii=False))
+    result = schema_test_validator().validate("stage2", json.dumps(payload, ensure_ascii=False))
     assert isinstance(result, Ok)
     assert result.obj["decision_trace"][0]["answer"] == "中性"
     assert result.obj["decision_trace"][1]["answer"] == "等待"
@@ -382,7 +411,7 @@ def test_validator_accepts_stage2_with_null_bar_range_and_forbid_phrase() -> Non
             },
         }
     )
-    result = JsonValidator().validate("stage2", json.dumps(payload, ensure_ascii=False))
+    result = schema_test_validator().validate("stage2", json.dumps(payload, ensure_ascii=False))
     assert isinstance(result, Ok)
     trace = result.obj["decision_trace"]
     assert trace[0]["bar_range"] == "不适用"
@@ -390,3 +419,35 @@ def test_validator_accepts_stage2_with_null_bar_range_and_forbid_phrase() -> Non
     assert trace[1]["node_id"] == "14.1"
     assert trace[1]["answer"] == "否"
     assert trace[1]["bar_range"] == "不适用"
+
+
+def test_repair_stage2_terminal_when_103_no() -> None:
+    """Regression: model ends at 9.5 but 10.3 answer=否 → terminal must be 10.3."""
+    obj = {
+        "decision": {"order_type": "不下单"},
+        "decision_trace": [
+            {"node_id": "9.5", "question": "q", "answer": "否", "reason": "无跟随", "bar_range": "K2-K1"},
+            {"node_id": "10.3", "question": "交易者方程是否通过？", "answer": "否", "reason": "方程不通过", "bar_range": "K1"},
+        ],
+        "terminal": {"node_id": "9.5", "outcome": "wait", "label": "等待"},
+    }
+    normalize_stage2_traces(obj, normalization_mode="strict")
+    assert obj["terminal"]["node_id"] == "10.3"
+
+
+def test_repair_stage2_canonical_question_42() -> None:
+    obj = {
+        "decision": {"order_type": "不下单"},
+        "decision_trace": [
+            {
+                "node_id": "4.2",
+                "question": "通道方向是否为下跌？",
+                "answer": "是",
+                "reason": "LL+LH",
+                "bar_range": "K48-K1",
+            },
+        ],
+        "terminal": {"node_id": "4.2", "outcome": "wait", "label": "x"},
+    }
+    normalize_stage2_traces(obj, normalization_mode="strict")
+    assert obj["decision_trace"][0]["question"] == "通道方向是上涨还是下跌？"

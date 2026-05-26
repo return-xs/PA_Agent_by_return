@@ -7,7 +7,9 @@ from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 from pa_agent.ai.json_validator import JsonValidator, Ok, ValidationError
 
-validator = JsonValidator()
+from tests.fixtures.validators import schema_test_validator
+
+validator = schema_test_validator()
 
 _ORDER_TYPES_WITH_TRADE = ["限价单", "突破单", "市价单"]
 _PRICE_FIELDS = ["entry_price", "take_profit_price", "stop_loss_price"]

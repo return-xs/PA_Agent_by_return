@@ -358,16 +358,18 @@ class DecisionTreePanel(QWidget):
                 f"border-radius: {T.RADIUS}px;"
             )
         elif gate_result in ("wait", "unknown"):
+            gr_zh = "等待" if gate_result == "wait" else "未知"
             self._terminal_banner.setText(
-                f"阶段一闸门：{gate_result} — 未进入阶段二策略评估"
+                f"阶段一闸门：{gr_zh}（{gate_result}）\n"
+                "未调用阶段二模型；下方为闸门路径。交易决策区为程序生成的「不下单」占位。"
             )
         else:
             self._terminal_banner.setText("无终点信息")
 
         if gate_shortcircuited:
             self._gate_hint.setText(
-                "阶段一 gate_result 为 wait/unknown，已短路阶段二 API，"
-                "仅展示闸门路径。"
+                "阶段一闸门未通过（wait/unknown）：已跳过阶段二 API 调用；"
+                "决策页「不下单」与「不可预测」为程序根据闸门结论自动生成，非模型策略评估。"
             )
         elif gate_result:
             self._gate_hint.setText(f"阶段一 gate_result：{gate_result}")

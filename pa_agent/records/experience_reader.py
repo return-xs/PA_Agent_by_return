@@ -146,6 +146,43 @@ class ExperienceReader:
 
         return entries
 
+    def read_for_stage2(
+        self,
+        cycle_position: str,
+        *,
+        direction: str = "",
+        patterns: list[str] | None = None,
+        max_entries: int = 3,
+        max_chars_per_entry: int = 400,
+    ) -> list[ExperienceEntry]:
+        """Return recent experience entries filtered for Stage 2 relevance."""
+        entries = self.read_top5(cycle_position)
+        if not entries:
+            return []
+
+        dir_norm = str(direction or "").strip().lower()
+        pattern_set = {
+            str(p).strip().lower() for p in (patterns or []) if str(p).strip()
+        }
+
+        def _score(entry: ExperienceEntry) -> int:
+            content = entry.content if isinstance(entry.content, dict) else {}
+            score = 0
+            ent_dir = str(content.get("direction", "") or "").strip().lower()
+            if dir_norm and ent_dir == dir_norm:
+                score += 2
+            ent_patterns = content.get("detected_patterns") or []
+            if pattern_set and isinstance(ent_patterns, list):
+                overlap = pattern_set.intersection(
+                    {str(p).strip().lower() for p in ent_patterns}
+                )
+                score += len(overlap)
+            return score
+
+        ranked = sorted(entries, key=lambda e: (_score(e), e.timestamp_ms), reverse=True)
+        cap = max(0, min(max_entries, 10))
+        return ranked[:cap]
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

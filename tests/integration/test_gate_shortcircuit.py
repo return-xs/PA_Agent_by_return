@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from unittest.mock import MagicMock
 
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
@@ -24,7 +24,7 @@ def test_gate_wait_skips_stage2_chat(
             "answer": "否",
             "action": "等待",
             "reason": "无法识别周期",
-            "bar_range": "K50-K1",
+            "bar_range": "K5-K1",
         }
     ]
     stage1_wait["cycle_position"] = "unknown"
@@ -36,7 +36,7 @@ def test_gate_wait_skips_stage2_chat(
         client=client,
         assembler=assembler,
         router=route_strategy_files,
-        validator=JsonValidator(),
+        validator=schema_test_validator(),
         pending_writer=pending_writer,
         exp_reader=exp_reader,
     )

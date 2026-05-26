@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
@@ -35,7 +35,7 @@ def test_stage1_missing_cycle_position(frame, pending_writer, assembler, exp_rea
     client = MagicMock()
     client.stream_chat.return_value = _make_reply(bad_stage1)
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,

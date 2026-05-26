@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from pa_agent.ai.json_validator import JsonValidator, Ok, ValidationError
+from pa_agent.ai.json_validator import Ok, ValidationError
 from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
 from pa_agent.util.trade_metrics import (
     compute_risk_reward,
@@ -11,7 +11,9 @@ from pa_agent.util.trade_metrics import (
     validate_order_trade_metrics,
 )
 
-validator = JsonValidator()
+from tests.fixtures.validators import schema_test_validator
+
+validator = schema_test_validator()
 
 
 def _frame() -> KlineFrame:
@@ -211,7 +213,8 @@ def test_stage2_validator_rejects_bad_rr() -> None:
     assert any("metrics:" in f for f in result.invalid_fields)
 
 
-def test_stage2_validator_rejects_breakout_entry_inside_basis_bar() -> None:
+def test_stage2_validator_auto_fixes_breakout_entry_at_or_inside_basis_high() -> None:
+    """Entry at/below K2 high is bumped to high + 1 tick before breakout_price check."""
     obj = _stage2_trade_obj(entry_price=101.5, take_profit_price=106.0, stop_loss_price=100.0)
     result = validator.validate(
         "stage2",
@@ -219,8 +222,9 @@ def test_stage2_validator_rejects_breakout_entry_inside_basis_bar() -> None:
         decision_stance="aggressive",
         kline_frame=_frame(),
     )
-    assert isinstance(result, ValidationError)
-    assert any("breakout_price:" in f for f in result.invalid_fields)
+    assert isinstance(result, Ok)
+    entry = result.obj["decision"]["entry_price"]
+    assert entry > 102.0
 
 
 def test_stage2_validator_rejects_stale_entry_bar() -> None:

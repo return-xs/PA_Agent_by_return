@@ -204,13 +204,18 @@ def _inject_stage1_missing_tail(text: str) -> str:
     return _balance_json_brackets(tail)
 
 
-def _try_repair_json_syntax(text: str, stage: Literal["stage1", "stage2"]) -> str | None:
+def _try_repair_json_syntax(
+    text: str,
+    stage: Literal["stage1", "stage2"],
+    *,
+    allow_tail_inject: bool = False,
+) -> str | None:
     """Return repaired JSON text when truncation caused a syntax error, else None."""
     if not text.strip().startswith("{"):
         return None
 
     candidate = text.rstrip()
-    if stage == "stage1":
+    if stage == "stage1" and allow_tail_inject:
         candidate = _inject_stage1_missing_tail(candidate)
     candidate = _balance_json_brackets(candidate)
     if candidate == text.rstrip():
@@ -227,8 +232,17 @@ def _try_repair_json_syntax(text: str, stage: Literal["stage1", "stage2"]) -> st
 class JsonValidator:
     """Validates raw AI text against Stage 1 or Stage 2 JSON schemas."""
 
-    def __init__(self) -> None:
+    def __init__(self, validation: Any = None) -> None:
         from pa_agent.ai.prompts.schemas import STAGE1_SCHEMA, STAGE2_SCHEMA
+        from pa_agent.config.settings import ValidationSettings
+
+        if validation is None:
+            self._validation = ValidationSettings()
+        elif hasattr(validation, "validation"):
+            self._validation = validation.validation
+        else:
+            self._validation = validation
+
         self._schemas = {
             "stage1": STAGE1_SCHEMA,
             "stage2": STAGE2_SCHEMA,
@@ -241,6 +255,9 @@ class JsonValidator:
         *,
         decision_stance: str | None = None,
         kline_frame: Any = None,
+        stage1_json: dict[str, Any] | None = None,
+        incremental_new_bar_count: int = 0,
+        incremental_previous_stage1: dict[str, Any] | None = None,
     ) -> Result:
         """Validate *raw_text* against the schema for *stage*.
 
@@ -262,7 +279,16 @@ class JsonValidator:
         try:
             obj = json.loads(stripped)
         except json.JSONDecodeError as exc:
-            repaired = _try_repair_json_syntax(stripped, stage)
+            # Stage 2: fail fast on syntax errors (no silent truncation repair).
+            allow_inject = (
+                stage == "stage1"
+                and not getattr(self._validation, "disable_truncation_repair", True)
+            )
+            repaired = (
+                _try_repair_json_syntax(stripped, stage, allow_tail_inject=allow_inject)
+                if stage == "stage1"
+                else None
+            )
             if repaired is not None:
                 try:
                     obj = json.loads(repaired)
@@ -292,14 +318,25 @@ class JsonValidator:
                 message="Top-level JSON value is not an object",
             )
 
+        norm_mode = getattr(self._validation, "normalization_mode", "strict")
         if stage == "stage1":
             from pa_agent.ai.stage1_normalizer import normalize_stage1
 
-            obj = normalize_stage1(obj)
+            obj = normalize_stage1(
+                obj,
+                normalization_mode=norm_mode,
+                kline_frame=kline_frame,
+                incremental_new_bar_count=int(incremental_new_bar_count or 0),
+                incremental_previous_stage1=incremental_previous_stage1
+                if incremental_new_bar_count > 0
+                else None,
+            )
         elif stage == "stage2":
             from pa_agent.ai.stage2_normalizer import normalize_stage2
 
-            obj = normalize_stage2(obj)
+            obj = normalize_stage2(
+                obj, normalization_mode=norm_mode, kline_frame=kline_frame
+            )
 
         # ── Schema validation (b and c) ───────────────────────────────────────
         try:
@@ -328,9 +365,40 @@ class JsonValidator:
         # ── Explicit cross-field checks ───────────────────────────────────────
         if stage == "stage1":
             from pa_agent.ai.decision_tree import validate_gate_result_consistency
+            from pa_agent.ai.coherence_checks import (
+                validate_incremental_stage1_coherence,
+                validate_stage1_coherence,
+            )
 
             for msg in validate_gate_result_consistency(obj):
                 invalid.append(f"gate:{msg}")
+            for msg in validate_stage1_coherence(
+                obj,
+                kline_frame=kline_frame,
+                strict_bar_features=getattr(
+                    self._validation, "strict_bar_by_bar_features", True
+                ),
+            ):
+                invalid.append(f"s1:{msg}")
+            if incremental_new_bar_count > 0:
+                for msg in validate_incremental_stage1_coherence(
+                    obj,
+                    new_bar_count=incremental_new_bar_count,
+                    previous_stage1=incremental_previous_stage1,
+                ):
+                    invalid.append(f"s1:{msg}")
+            if getattr(self._validation, "trace_semantic_checks", True):
+                from pa_agent.ai.trace_semantic_checks import validate_trace_semantics
+
+                gate_trace = obj.get("gate_trace")
+                if isinstance(gate_trace, list):
+                    for msg in validate_trace_semantics(
+                        gate_trace,
+                        path_prefix="gate_trace",
+                        stage="stage1",
+                        gate_result=str(obj.get("gate_result", "")),
+                    ):
+                        invalid.append(f"trace_semantic:{msg}")
 
         if stage == "stage2":
             no_order_err = self._check_no_order_invariant(obj)
@@ -356,9 +424,31 @@ class JsonValidator:
                 invalid.append(f"metrics:{msg}")
 
             from pa_agent.ai.decision_tree import validate_stage2_trace_consistency
+            from pa_agent.ai.coherence_checks import validate_stage2_coherence
 
             for msg in validate_stage2_trace_consistency(obj):
                 invalid.append(f"trace:{msg}")
+            if isinstance(stage1_json, dict):
+                for msg in validate_stage2_coherence(
+                    obj, stage1_json, kline_frame=kline_frame
+                ):
+                    invalid.append(f"s2:{msg}")
+            if getattr(self._validation, "trace_semantic_checks", True):
+                from pa_agent.ai.trace_semantic_checks import (
+                    validate_stage2_order_trace_semantics,
+                    validate_trace_semantics,
+                )
+
+                decision_trace = obj.get("decision_trace")
+                if isinstance(decision_trace, list):
+                    for msg in validate_trace_semantics(
+                        decision_trace,
+                        path_prefix="decision_trace",
+                        stage="stage2",
+                    ):
+                        invalid.append(f"trace_semantic:{msg}")
+                for msg in validate_stage2_order_trace_semantics(obj):
+                    invalid.append(f"trace_semantic:{msg}")
 
         if not errors and not missing and not invalid:
             return Ok(obj=obj)
@@ -493,15 +583,15 @@ class JsonValidator:
         direction = decision.get("order_direction")
         extreme = decision.get("entry_basis_extreme")
         if direction == "做多" and extreme == "high" and entry <= float(bar.high):
-            return (
+            return [
                 f"做多突破单 entry_price={entry:.6g} must be above "
                 f"K{basis}.high={float(bar.high):.6g}"
-            )
+            ]
         if direction == "做空" and extreme == "low" and entry >= float(bar.low):
-            return (
+            return [
                 f"做空突破单 entry_price={entry:.6g} must be below "
                 f"K{basis}.low={float(bar.low):.6g}"
-            )
+            ]
         return []
 
     @staticmethod

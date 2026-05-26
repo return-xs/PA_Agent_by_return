@@ -135,10 +135,21 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
+使用 **A股 (AkShare)** 数据源时额外安装：
+
+```cmd
+pip install -e ".[ashare]"
+```
+
+默认 **仅 AkShare**（东财）；若需 AkShare 失败时回退 Baostock，请设置环境变量 `PA_AGENT_BAOSTOCK_FALLBACK=1` 并安装 `baostock`。
+
+若东财长期不可用，可选用 **TradingView** 拉 K 线：数据来源选 TradingView，支持 **A 股**（6 位 + SSE/SZSE）、**港股**（`HKEX` + 代码）、**股票名称**（如 `小米集团`，内置别名表；**品种框保持你输入的文字**，仅在后台按别名拉取 K 线）。交易所选 **（自动）** 时会依次探测合适市场。自定义名称可编辑 `config/tv_symbol_aliases.json`（参考 `tv_symbol_aliases.example.json`）。
+
 > 国内镜像示例：
 >
 > ```cmd
 > pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+> pip install -e ".[ashare]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 > ```
 
 ### 6. 配置 API

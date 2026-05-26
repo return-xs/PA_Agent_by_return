@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
@@ -29,7 +29,7 @@ def test_cancel_before_stage2(frame, pending_writer, assembler, exp_reader):
     client = MagicMock()
     client.stream_chat.side_effect = chat_side_effect
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,

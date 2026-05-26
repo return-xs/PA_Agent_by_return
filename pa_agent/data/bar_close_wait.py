@@ -62,9 +62,75 @@ def seconds_until_bar_closes(
     return int(math.ceil(remaining_ms / 1000))
 
 
-def current_forming_ts(bars_newest_first: list[KlineBar]) -> int | None:
-    """Return ts_open of the newest (forming) bar, or None if empty."""
+def _looks_like_ashare_symbol(symbol: str | None) -> bool:
+    from pa_agent.data.market_defaults import normalize_ashare_tv_code
+
+    code = normalize_ashare_tv_code(symbol or "")
+    return len(code) == 6 and code.isdigit()
+
+
+def is_bar_still_forming(
+    bar: KlineBar,
+    timeframe: str,
+    *,
+    now_ms: int | None = None,
+    symbol: str | None = None,
+) -> bool:
+    """True when the newest bar period has not ended (wall-clock + A-share daily session)."""
+    if bar.closed:
+        return False
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    tf = str(timeframe or "").strip().lower()
+    if tf == "1d" and _looks_like_ashare_symbol(symbol):
+        try:
+            from pa_agent.data.akshare_source import _ashare_session_open
+
+            if not _ashare_session_open():
+                return False
+        except ImportError:
+            pass
+    duration_s = timeframe_to_seconds(timeframe)
+    if duration_s is None:
+        return True
+    ts_open = int(bar.ts_open)
+    if ts_open < 10_000_000_000:
+        ts_open *= 1000
+    close_ms = ts_open + duration_s * 1000
+    return int(now_ms) < close_ms
+
+
+def has_forming_bar_at_head(
+    bars_newest_first: list[KlineBar],
+    timeframe: str | None = None,
+    *,
+    now_ms: int | None = None,
+    symbol: str | None = None,
+) -> bool:
+    """True when index 0 is a real forming bar (not a stale unclosed flag after halt)."""
     if not bars_newest_first:
+        return False
+    if not timeframe:
+        return not bars_newest_first[0].closed
+    return is_bar_still_forming(
+        bars_newest_first[0],
+        timeframe,
+        now_ms=now_ms,
+        symbol=symbol,
+    )
+
+
+def current_forming_ts(
+    bars_newest_first: list[KlineBar],
+    timeframe: str | None = None,
+    *,
+    symbol: str | None = None,
+    now_ms: int | None = None,
+) -> int | None:
+    """Return ts_open of the newest forming bar, or None if head bar is already closed."""
+    if not has_forming_bar_at_head(
+        bars_newest_first, timeframe, now_ms=now_ms, symbol=symbol
+    ):
         return None
     return int(bars_newest_first[0].ts_open)
 
@@ -72,8 +138,16 @@ def current_forming_ts(bars_newest_first: list[KlineBar]) -> int | None:
 def forming_bar_has_closed(
     waited_ts_open: int,
     bars_newest_first: list[KlineBar],
+    timeframe: str | None = None,
+    *,
+    symbol: str | None = None,
+    now_ms: int | None = None,
 ) -> bool:
-    """True when a new forming bar replaced the one we were waiting on."""
+    """True when the waited bar finished (new bar appeared or head is no longer forming)."""
     if not bars_newest_first:
         return False
-    return int(bars_newest_first[0].ts_open) != waited_ts_open
+    if not has_forming_bar_at_head(
+        bars_newest_first, timeframe, now_ms=now_ms, symbol=symbol
+    ):
+        return True
+    return int(bars_newest_first[0].ts_open) != int(waited_ts_open)

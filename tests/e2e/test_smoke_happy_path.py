@@ -1,4 +1,4 @@
-"""E2E smoke test — happy path: two-stage analysis produces a trading decision.
+"""E2E smoke test �?happy path: two-stage analysis produces a trading decision.
 
 Task 19.1
 """
@@ -9,10 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pa_agent.data.base import KlineBar
-from pa_agent.data.kline_buffer import KlineBuffer
 from pa_agent.app_context import AppContext
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.kline_bars import make_newest_first_bars
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 
 from tests.fixtures.ai_payloads import VALID_STAGE1, VALID_STAGE2_ORDER
@@ -35,23 +34,6 @@ def _make_ctx(tmp_path, stage2_response=None):
     if stage2_response is None:
         stage2_response = VALID_STAGE2_ORDER
 
-    buffer = KlineBuffer(capacity=500)
-    for i in range(10, 0, -1):
-        bar = KlineBar(
-            seq=i,
-            ts_open=1_700_000_000_000 - i * 3_600_000,
-            open=2000.0,
-            high=2010.0,
-            low=1990.0,
-            close=2005.0,
-            volume=100.0,
-            closed=(i > 1),
-        )
-        if i == 1:
-            buffer.update_forming(bar)
-        else:
-            buffer.append(bar)
-
     mock_client = MagicMock()
     mock_client.stream_chat.side_effect = [
         _make_reply(VALID_STAGE1),
@@ -65,11 +47,10 @@ def _make_ctx(tmp_path, stage2_response=None):
     pending_writer = MagicMock()
 
     ctx = AppContext()
-    ctx.buffer = buffer
     ctx.client = mock_client
     ctx.assembler = mock_assembler
     ctx.router = route_strategy_files
-    ctx.validator = JsonValidator()
+    ctx.validator = schema_test_validator()
     ctx.pending_writer = pending_writer
     ctx.exp_reader = MagicMock()
     ctx.exp_reader.read_top5.return_value = []
@@ -88,10 +69,9 @@ def test_happy_path_shows_trading_decision(qtbot, tmp_path):
     qtbot.addWidget(window)
     window.show()
 
-    # Set bar count to 5 so take_snapshot succeeds with our 10-bar buffer
     window._ctx.settings.general.analysis_bar_count = 5
+    window._last_frame_ready_bars = make_newest_first_bars(9, with_forming=True)
 
-    # Trigger analysis
     window._on_submit_analysis()
 
     # Poll until the analysis is no longer in progress (worker done).
@@ -102,13 +82,13 @@ def test_happy_path_shows_trading_decision(qtbot, tmp_path):
         timeout=10_000,
     )
 
-    # DecisionPanel should show a trading decision (not 不下单)
+    # DecisionPanel should show a trading decision (not 不下�?
     conclusion_text = window._decision_panel._conclusion_label.text()
-    assert "不下单" not in conclusion_text, (
+    assert "不下�? not in conclusion_text, (
         f"Expected a trading decision, got: {conclusion_text!r}"
     )
-    assert conclusion_text != "—", (
-        "DecisionPanel still shows default '—', expected a decision"
+    assert conclusion_text != "�?, (
+        "DecisionPanel still shows default '�?, expected a decision"
     )
 
     # PendingWriter.save_full should have been called

@@ -26,6 +26,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ashare = [
+    "akshare>=1.14",
+    "baostock>=0.8",
+]
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",

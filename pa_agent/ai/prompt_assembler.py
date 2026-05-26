@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from pa_agent.ai.decision_stance import build_decision_stance_guidance, normalize_stance
+from pa_agent.ai.pattern_routing import (
+    STAGE1_DETECTED_PATTERNS_GUIDE,
+    STAGE1_PATTERN_BRIEFS_BLOCK,
+)
 from pa_agent.ai.kline_features import bar_candle_direction_label, compute_kline_geometry_features
 from pa_agent.data.base import KlineFrame
 from pa_agent.data.datetime_ts import format_epoch_for_display
@@ -144,9 +148,11 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 
 ## 阶段一闸门（二元决策树 §0–§2，必须执行）
 
-在输出诊断 JSON 前，按《二元决策.txt》**依次**评估以下节点，并写入 gate_trace（仅记录你实际评估的节点，通常 6–10 条）：
+在输出诊断 JSON 前，按《二元决策_闸门.txt》**依次**评估以下节点，并写入 gate_trace：
+**当 gate_result=proceed 时，必须包含节点 0.1、0.2、1.1、1.2、1.3、2.1、2.2、2.3、2.4、2.5 共 10 条**（每条独立 reason 与 bar_range，禁止照抄示例）：
 §0：0.1 看得懂市场 → 0.2 是否具备继续分析的条件（定性，**不是**交易者方程）
 §1：1.1 数据足够 → 1.2 识别周期 → 1.3 极端混乱
+- **节点 1.2**：answer 用 是/否；识别出的周期类型写在 **branch**（如 `broad_channel`、`trading_range`），**禁止** branch 写 `yes`/`no`（与 0.1/1.1 不同）。
 §2：2.1 惯性方向 → 2.2 大时间框架 → 2.3 多/空/中性 → 2.4 Always In 状态 → 2.5 惯性强度（**answer 只能用 是/否/中性**；方向或 AIL/AIS 写在 branch，勿写「多头」「空头」作 answer）
 
 **禁止在阶段一评估：**
@@ -154,23 +160,28 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 - **§9–§11**（入场、风险、下单均属阶段二）
 
 **逐K摘要硬规则：**
-- 必须输出 `bar_by_bar_summary`，覆盖最近 8–12 根已收盘 K 线（数据不足则覆盖全部；勿超过 12 条以免截断 gate_trace）。
+- 必须输出 `bar_by_bar_summary`，**至少 8 条**（分析窗口≥8根时），覆盖最近 **K8–K1** 每一根已收盘 K 线各 1 条（可简写 reason，但**不可只写 K5–K1 共 5 条**）；最多 12 条。数据不足 8 根则覆盖全部。
 - 每条只写该 K 线对当前结构的增量作用，不写下单价格、不写止损止盈。
 - `role` 只能使用示例中的 8 个英文枚举；延续/跟随棒统一写 `confirmation`，不要写 `continuation`。
 - K线序号方向：K1 是最新已收盘，K2 是它前一根；判断 K2 的后续跟随时看 K1，判断 K3 的后续跟随时看 K2/K1；K1 的跟随通常为 pending。
 - `bar_type` 必须优先对齐程序提供的 K线几何特征表。
+- `context_effect` 必须使用 **strengthens_bull / strengthens_bear**（带 s），禁止写 strengthen_bull、strengthen_bear。
 
 规则：
 - answer 只能是：是 / 否 / 中性 / 等待 / 不适用（**禁止**写「部分」「待确认」「待定」等——部分一致用 **中性**，尚需下一根K线确认用 **等待**）
 - 任一闸门导致「等待/unknown」时，gate_result 设为 wait 或 unknown，并在最后一条 trace 写明 reason
 - gate_result=proceed 表示可通过闸门进入阶段二；wait/unknown 表示不应进入策略与下单评估
 - gate_trace 与 cycle_position、direction 不得矛盾
+- 每条 gate_trace.reason 须非空且说明依据（勿只写「通过」「是」等套话）
+- gate_result=proceed 时，**最后一条** gate_trace.reason 须含「闸门通过」或「进入阶段二」
+- 节点 2.4 / 2.5 的 question 须与决策树原文一致（含 Always In 空格、用「支持」而非仅改措辞）
 
 **每条 gate_trace / decision_trace 必须包含 bar_range（K线依据，由你自行判断）：**
 - **程序不会替你填写**；你必须根据「本节点实际引用了哪些 K 线」写出序号范围
 - 格式：`K{较老序号}-K{较新序号}` 或单根 `K1`（**序号1=最新已收盘**，序号越大越早）
 - **每个节点的 bar_range 应不同**（除非该节点确实与上一节点使用完全相同窗口）；禁止所有节点照抄同一个范围
 - 区间格式必须为 **K{较老}-K{较新}**（如 K4-K1），**禁止** K1-K4；单根写 K1；全图分析可写「全局」（程序会展开）
+- **reason 里写到的每一根 K 线**（如「K4 之后」「对比 K2」）都必须落在该条 **bar_range** 内；勿在 bar_range=K2 的 reason 里单独提 K4——应写 **K4-K2** 或 **K4-K1**，或 reason 只谈 K2
 - 方向/分类类节点（如 4.2 上涨还是下跌）：**answer 只用 是/否/中性**，方向写在 **branch**（bullish/bearish），勿写「上涨」「下跌」作 answer
 - **6.2**（区间类型）：answer=是/否，branch=trending_tr 或 trading_range；勿把「趋势型交易区间」写在 answer
 - **6.3**（是否在边界）：answer=是/否，branch=lower/upper/middle；勿写「是，在下边界」——应写 answer=是、branch=lower
@@ -291,12 +302,13 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 - 因方程不通过而放弃：terminal.node_id 应为 **10.3**，outcome=reject 或 wait
 - 完成 10.3 后，必须把你在方程中使用的**胜率主观估计**写入 decision.estimated_win_rate（0–100 整数），并在 estimated_win_rate_reasoning 简要说明依据；**禁止**留空或仅从 trace 文字里暗示
 
-**突破单 entry_price 硬规则：**
+**突破单 entry_price 硬规则（程序会按 K 线表小数位推断最小跳动并校验）：**
 - order_type="突破单" 时，必须填写 decision.entry_basis_bar、decision.entry_basis_extreme、decision.entry_rule。
-- 做多突破单：entry_basis_extreme 必须为 "high"，entry_price 必须位于 entry_basis_bar 高点上方 1 跳动或至少明确高于该高点。
-- 做空突破单：entry_basis_extreme 必须为 "low"，entry_price 必须位于 entry_basis_bar 低点下方 1 跳动或至少明确低于该低点。
-- 突破单禁止使用 K 线实体中部、当前价附近、EMA 附近或任意折中价作为 entry_price。
-- 如果无法从 K线表确定依据 K 线极点或 tick size，不得编造中间价；应输出 order_type="不下单"，并说明等待信号棒极点被突破。
+- 做多突破单：entry_basis_extreme 必须为 "high"。从 K 线表读出 entry_basis_bar 的 **high**，设 `entry_price = high + 1×最小跳动`（**必须严格大于 high，禁止等于 high**）。示例：K1 high=4556.595、跳动=0.001 → entry_price=4556.596。
+- 做空突破单：entry_basis_extreme 必须为 "low"。`entry_price = low − 1×最小跳动`（**必须严格低于 low**）。
+- entry_rule 只写挂单位置规则（如「K1 高点上方 1 跳动」），**禁止**在 entry_rule 里重复 order_type/方向或写 `entry_price=` 公式串。
+- 突破单禁止使用 K 线实体中部、收盘价、EMA 或「约等于高点」作为 entry_price。
+- 若无法从 K 线表确定依据 K 的 high/low 或最小跳动，应 order_type="不下单"，勿编造中间价。
 - 限价单/市价单不使用 entry_basis_* 字段，可填 null。
 
 **§9 逐K信号链与新鲜度硬规则：**
@@ -374,25 +386,43 @@ _NEXT_BAR_PREDICTION_INSTRUCTION = """\
 """.strip()
 
 # txt files merged into each stage prompt (order preserved)
-# 二元决策.txt lives in system once — shared by Stage 1 and Stage 2 (avoids ~10k×2 chars/run).
-COMMON_SYSTEM_PROMPT_TXT_FILES: tuple[str, ...] = (
+COMMON_SYSTEM_STAGE1_TXT_FILES: tuple[str, ...] = (
+    "提示词大纲_人设与思维方式.txt",
+    "二元决策_闸门.txt",
+)
+COMMON_SYSTEM_STAGE2_TXT_FILES: tuple[str, ...] = (
     "提示词大纲_人设与思维方式.txt",
     "二元决策.txt",
 )
+# Back-compat alias for UI helpers that list “common” files (Stage 2 full tree).
+COMMON_SYSTEM_PROMPT_TXT_FILES: tuple[str, ...] = COMMON_SYSTEM_STAGE2_TXT_FILES
 
 STAGE1_TASK_PROMPT_TXT_FILES: tuple[str, ...] = (
     "市场诊断框架.txt",
     "文件16-K线信号识别.txt",
     "逐棒分析检查单.txt",
-    "文件13-窄通道与宽通道策略.txt",
-    "文件14-楔形形态分析交易.txt",
-    "文件15-二次入场机会.txt",
-    "文件18-突破失败与突破测试.txt",
-    "文件19-H1H2-L1L2计数.txt",
-    "文件20-AlwaysIn与20GB.txt",
-    "文件21-铁丝网与无交易环境.txt",
-    "文件22-信号失败后的磁力位.txt",
 )
+
+_CHANNEL_FILE_GROUPS: dict[str, tuple[str, ...]] = {
+    "bullish": (
+        "上涨通道分析识别.txt",
+        "上涨通道交易策略.txt",
+    ),
+    "bearish": (
+        "下跌通道分析识别.txt",
+        "下跌通道交易策略.txt",
+    ),
+}
+_SPIKE_FILE_GROUPS: dict[str, tuple[str, ...]] = {
+    "bullish": (
+        "极速上涨分析识别.txt",
+        "极速上涨交易策略.txt",
+    ),
+    "bearish": (
+        "极速下跌分析识别.txt",
+        "极速下跌交易策略.txt",
+    ),
+}
 
 STAGE2_BASE_PROMPT_TXT_FILES: tuple[str, ...] = (
     "逐棒分析检查单.txt",
@@ -428,22 +458,67 @@ def _fmt_feature(value: float | None) -> str:
 
 def stage1_prompt_txt_files() -> list[str]:
     """Return ordered .txt filenames injected in the Stage 1 prompt."""
-    return [*COMMON_SYSTEM_PROMPT_TXT_FILES, *STAGE1_TASK_PROMPT_TXT_FILES]
+    return [*COMMON_SYSTEM_STAGE1_TXT_FILES, *STAGE1_TASK_PROMPT_TXT_FILES]
 
 
-def stage2_user_task_txt_files(strategy_files: list[str] | None = None) -> list[str]:
+def _directional_channel_files(direction: str) -> list[str]:
+    key = str(direction or "").strip().lower()
+    if key in _CHANNEL_FILE_GROUPS:
+        return list(_CHANNEL_FILE_GROUPS[key])
+    return []
+
+
+def stage2_user_task_txt_files(
+    strategy_files: list[str] | None = None,
+    *,
+    direction: str = "",
+    load_full_strategy_library: bool = False,
+) -> list[str]:
     """Return .txt filenames loaded into the Stage 2 user turn only."""
-    files = [
-        *(f for f in (strategy_files or []) if f),
-        *STAGE2_FULL_STRATEGY_PROMPT_TXT_FILES,
-        *STAGE2_BASE_PROMPT_TXT_FILES,
-    ]
-    return list(dict.fromkeys(files))
+    routed = [f for f in (strategy_files or []) if f]
+    if load_full_strategy_library:
+        core = [*STAGE2_FULL_STRATEGY_PROMPT_TXT_FILES, *STAGE2_BASE_PROMPT_TXT_FILES]
+    else:
+        dir_key = str(direction or "").strip().lower()
+        opposite = (
+            _CHANNEL_FILE_GROUPS.get("bearish", ())
+            if dir_key == "bullish"
+            else _CHANNEL_FILE_GROUPS.get("bullish", ())
+            if dir_key == "bearish"
+            else ()
+        )
+        opposite_spike = (
+            _SPIKE_FILE_GROUPS.get("bearish", ())
+            if dir_key == "bullish"
+            else _SPIKE_FILE_GROUPS.get("bullish", ())
+            if dir_key == "bearish"
+            else ()
+        )
+        skip = frozenset((*opposite, *opposite_spike))
+        core = [
+            f
+            for f in routed
+            if f not in skip
+        ]
+        core.extend(STAGE2_BASE_PROMPT_TXT_FILES)
+    return list(dict.fromkeys([*core]))
 
 
-def stage2_prompt_txt_files(strategy_files: list[str] | None = None) -> list[str]:
+def stage2_prompt_txt_files(
+    strategy_files: list[str] | None = None,
+    *,
+    direction: str = "",
+    load_full_strategy_library: bool = False,
+) -> list[str]:
     """Return all .txt files relevant to Stage 2 (system common + user task), for UI/debug."""
-    return [*COMMON_SYSTEM_PROMPT_TXT_FILES, *stage2_user_task_txt_files(strategy_files)]
+    return [
+        *COMMON_SYSTEM_STAGE2_TXT_FILES,
+        *stage2_user_task_txt_files(
+            strategy_files,
+            direction=direction,
+            load_full_strategy_library=load_full_strategy_library,
+        ),
+    ]
 
 
 # ── PromptAssembler ────────────────────────────────────────────────────────────
@@ -455,9 +530,18 @@ class PromptAssembler:
         self,
         prompt_dir: Path,
         experience_reader: Any = None,
+        *,
+        prompt_settings: Any = None,
     ) -> None:
         self._prompt_dir = prompt_dir
         self._experience_reader = experience_reader
+        self._prompt_settings = prompt_settings
+
+    def _load_full_strategy_library(self) -> bool:
+        cfg = self._prompt_settings
+        if cfg is None:
+            return False
+        return bool(getattr(cfg, "stage2_load_full_strategy_library", False))
 
     # ── File loading ──────────────────────────────────────────────────────────
 
@@ -525,7 +609,7 @@ class PromptAssembler:
 
     def build_stage1(self, frame: KlineFrame) -> list[dict]:
         """Build the message list for Stage 1 (market diagnosis)."""
-        system_content = self._build_common_system_prompt()
+        system_content = self._build_stage1_system_prompt()
         user_content = self._build_stage1_user_prompt(frame)
 
         return [
@@ -540,7 +624,7 @@ class PromptAssembler:
         new_bar_count: int,
     ) -> list[dict]:
         """Build Stage 1 as an incremental update from a previous record."""
-        system_content = self._build_common_system_prompt()
+        system_content = self._build_stage1_system_prompt()
         user_content = self._build_incremental_stage1_user_prompt(
             frame,
             previous_record,
@@ -551,16 +635,32 @@ class PromptAssembler:
             {"role": "user", "content": user_content},
         ]
 
-    def _build_common_system_prompt(self) -> str:
-        """Build the stable system prompt shared by Stage 1 and Stage 2."""
+    def _build_stage1_system_prompt(self) -> str:
+        """Stage 1 system: persona + gate-only decision tree (§0–§2)."""
         system_parts = [_LANGUAGE_ZH_RULE, _PA_TERMINOLOGY_ZH, _THINKING_CONTENT_OUTPUT_RULE]
-        system_parts.extend(self._load(name) for name in COMMON_SYSTEM_PROMPT_TXT_FILES)
+        system_parts.extend(self._load(name) for name in COMMON_SYSTEM_STAGE1_TXT_FILES)
         return "\n\n---\n\n".join(p for p in system_parts if p)
+
+    def _build_stage2_system_prompt(self) -> str:
+        """Stage 2 system: persona + full decision tree."""
+        system_parts = [_LANGUAGE_ZH_RULE, _PA_TERMINOLOGY_ZH, _THINKING_CONTENT_OUTPUT_RULE]
+        system_parts.extend(self._load(name) for name in COMMON_SYSTEM_STAGE2_TXT_FILES)
+        return "\n\n---\n\n".join(p for p in system_parts if p)
+
+    def _stage1_pattern_supplement(self) -> str:
+        """Pattern tag table + briefs for Stage 1 (optional via settings)."""
+        if self._prompt_settings is not None and not getattr(
+            self._prompt_settings, "stage1_inject_pattern_briefs", True
+        ):
+            return ""
+        return f"{STAGE1_DETECTED_PATTERNS_GUIDE}\n\n---\n\n{STAGE1_PATTERN_BRIEFS_BLOCK}"
 
     def _build_stage1_user_prompt(self, frame: KlineFrame) -> str:
         """Build the Stage 1 task turn; stage-specific rules stay out of system."""
+        pattern_block = self._stage1_pattern_supplement()
         stage1_parts = [
             *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
+            *([pattern_block] if pattern_block else []),
             _STAGE1_OUTPUT_REMINDER,
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
@@ -592,8 +692,10 @@ class PromptAssembler:
         new_bar_count: int,
     ) -> str:
         """Build a Stage 1 update turn using the last completed analysis."""
+        pattern_block = self._stage1_pattern_supplement()
         stage1_parts = [
             *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
+            *([pattern_block] if pattern_block else []),
             _STAGE1_OUTPUT_REMINDER,
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
@@ -617,6 +719,13 @@ class PromptAssembler:
             "- 先检查上一轮诊断在新增 K 线后是否仍成立。\n"
             "- 如果市场结构未被破坏，可以延续上一轮 cycle_position/direction，但必须用新增 K 线重新说明依据。\n"
             "- 如果新增 K 线出现突破、反转、极端波动或让原结论失效，必须更新诊断。\n"
+            "- 必须输出顶层字段 **incremental_delta**（不可省略），结构示例：\n"
+            '  "incremental_delta": {"new_closed_bars":["K1"],'
+            '"changed_fields":["direction","cycle_position"],'
+            '"summary":"相对上一轮：新增K1突破区间上沿，方向由中性转偏多"}\n'
+            "- new_closed_bars 长度必须等于「新增已收盘K线」数量（1根则只写 [\"K1\"]）。\n"
+            "- 并在 summary / risk_warning / gate_trace 中说明相对上一轮变化。\n"
+            "- gate_result=proceed 时 gate_trace 仍须覆盖 §0–§2 全部闸门节点（0.1–2.5）。\n"
             "- 输出仍必须是完整阶段一 JSON，而不是差异补丁。\n\n"
             f"{stage1_context}\n\n"
             "---\n\n"
@@ -650,7 +759,7 @@ class PromptAssembler:
         decision_stance: str = "conservative",
     ) -> list[dict]:
         """Build a standalone Stage 2 request (kept for tests/tools)."""
-        system_content = self._build_common_system_prompt()
+        system_content = self._build_stage2_system_prompt()
         user_content = self._build_stage2_user_prompt(
             frame=frame,
             stage1_json=stage1_json,
@@ -715,10 +824,7 @@ class PromptAssembler:
         Stage 1 user turn is huge (framework + 100 bars). Re-sending it for Stage 2
         balloons prompt tokens and often exhausts thinking before any content JSON.
         """
-        system_content = next(
-            (m.get("content", "") for m in stage1_messages if m.get("role") == "system"),
-            self._build_common_system_prompt(),
-        )
+        system_content = self._build_stage2_system_prompt()
         return [
             {"role": "system", "content": system_content},
             {"role": "assistant", "content": stage1_reply_content},
@@ -753,10 +859,31 @@ class PromptAssembler:
         stage2_parts = [
             stance_block,
             transition_block,
-            *(self._load(name) for name in stage2_user_task_txt_files(strategy_files)),
+            *(
+                self._load(name)
+                for name in stage2_user_task_txt_files(
+                    strategy_files,
+                    direction=str(stage1_json.get("direction", "") or ""),
+                    load_full_strategy_library=self._load_full_strategy_library(),
+                )
+            ),
         ]
         if experience_entries:
-            stage2_parts.append(self._render_experience(experience_entries))
+            max_chars = 400
+            if self._prompt_settings is not None:
+                max_chars = int(
+                    getattr(
+                        self._prompt_settings,
+                        "experience_max_chars_per_entry",
+                        400,
+                    )
+                )
+            stage2_parts.append(
+                self._render_experience(
+                    experience_entries,
+                    max_chars_per_entry=max_chars,
+                )
+            )
         stage2_parts.append(_STAGE2_OUTPUT_CONTRACT)
         stage2_parts.append(_NEXT_BAR_PREDICTION_INSTRUCTION)
         stage2_context = "\n\n---\n\n".join(p for p in stage2_parts if p)
@@ -772,7 +899,10 @@ class PromptAssembler:
                 f"```json\n{json.dumps(gate_trace, ensure_ascii=False, indent=2)}\n```\n\n"
             )
 
+        from pa_agent.util.price_tick import format_breakout_tick_hint
+
         n_bars = len(frame.bars)
+        breakout_tick_hint = format_breakout_tick_hint(frame)
         kline_block = (
             f"## K线数据(与阶段一相同, 共{n_bars}根，含阳阴列；各节点 bar_range 由你据实填写)\n\n"
             f"{kline_table}\n\n"
@@ -781,6 +911,8 @@ class PromptAssembler:
             if include_kline_table
             else f"## K线数据\n\n沿用上一轮阶段一用户消息中的同一份 K线数据，共 {n_bars} 根；各节点 bar_range 由你据实填写。\n\n"
         )
+        if breakout_tick_hint and include_kline_table:
+            kline_block += f"{breakout_tick_hint}\n\n"
         prev_pred_block = self._render_previous_prediction(previous_record)
         return (
             "## 阶段二任务\n\n"
@@ -788,7 +920,9 @@ class PromptAssembler:
             "上一轮 assistant 消息是阶段一完整响应，下面的 JSON 是程序校验通过后的阶段一诊断结果，若两者有细微格式差异，以此处 JSON 为准。\n\n"
             f"{stage2_context}\n\n"
             "---\n\n"
-            f"## 阶段一诊断结果\n\n```json\n{json.dumps(stage1_json, ensure_ascii=False, indent=2)}\n```\n\n"
+            f"## 阶段一诊断结果\n\n```json\n"
+            f"{json.dumps(self._compact_stage1_for_stage2(stage1_json), ensure_ascii=False, indent=2)}"
+            f"\n```\n\n"
             f"{gate_block}"
             f"{kline_block}"
             f"{prev_pred_block + chr(10) if prev_pred_block else ''}"
@@ -804,7 +938,31 @@ class PromptAssembler:
         experience_entries: list[Any],
     ) -> str:
         """Return the shared system prompt used by Stage 2 requests."""
-        return self._build_common_system_prompt()
+        return self._build_stage2_system_prompt()
+
+    @staticmethod
+    def _compact_stage1_for_stage2(stage1_json: dict) -> dict:
+        """Subset of Stage 1 fields needed for Stage 2 (reduces prompt noise)."""
+        keys = (
+            "cycle_position",
+            "alternative_cycle_position",
+            "direction",
+            "diagnosis_confidence",
+            "spike_stage",
+            "market_phase",
+            "transition_risk",
+            "detected_patterns",
+            "key_signals",
+            "htf_context",
+            "entry_setup",
+            "strategy_files_needed",
+            "risk_warning",
+            "bar_analysis",
+            "bar_by_bar_summary",
+            "gate_trace",
+            "gate_result",
+        )
+        return {k: stage1_json[k] for k in keys if k in stage1_json}
 
     @staticmethod
     def _render_transition_guidance(stage1_json: dict) -> str:
@@ -830,14 +988,28 @@ class PromptAssembler:
         )
 
     @staticmethod
-    def _render_experience(entries: list[Any]) -> str:
+    def _render_experience(
+        entries: list[Any],
+        *,
+        max_chars_per_entry: int = 400,
+    ) -> str:
         """Render experience library entries as a text block."""
-        lines = ["## 经验库(最近案例,供参考)"]
+        lines = [
+            "## 经验库(最近案例,供参考)",
+            "以下案例仅作对照，**不得**因相似就改变对本图结构/方向的独立判断。",
+        ]
         for i, entry in enumerate(entries, 1):
             if isinstance(entry, dict):
-                lines.append(
-                    f"\n### 案例 {i}\n```json\n{json.dumps(entry, ensure_ascii=False, indent=2)}\n```"
+                blob = json.dumps(entry, ensure_ascii=False, indent=2)
+            elif hasattr(entry, "content"):
+                blob = json.dumps(
+                    getattr(entry, "content", entry),
+                    ensure_ascii=False,
+                    indent=2,
                 )
             else:
-                lines.append(f"\n### 案例 {i}\n{entry}")
+                blob = str(entry)
+            if len(blob) > max_chars_per_entry:
+                blob = blob[: max_chars_per_entry - 3] + "..."
+            lines.append(f"\n### 案例 {i}\n```json\n{blob}\n```")
         return "\n".join(lines)

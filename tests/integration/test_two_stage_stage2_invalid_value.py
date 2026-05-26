@@ -8,7 +8,7 @@ import copy
 import json
 from unittest.mock import MagicMock
 
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
@@ -39,7 +39,7 @@ def test_stage2_invalid_confidence(frame, pending_writer, assembler, exp_reader)
         _make_reply(bad_stage2),
     ]
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,

@@ -1,4 +1,4 @@
-"""Live KKAI thinking probe — skipped unless KKAI_API_KEY is set.
+"""Live KKAI thinking probe skipped unless KKAI_API_KEY is set.
 
 Run:
   set KKAI_API_KEY=sk-...

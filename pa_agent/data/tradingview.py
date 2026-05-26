@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from pa_agent.data.base import (
     DataSource,
@@ -9,10 +10,19 @@ from pa_agent.data.base import (
     KlineBar,
 )
 from pa_agent.data.datetime_ts import datetime_to_ts_ms
-from pa_agent.data.market_defaults import resolve_tv_gold_pair
+from pa_agent.data.bar_close_wait import is_bar_still_forming
+from pa_agent.data.market_defaults import (
+    equity_tv_auto_probe_plan,
+    is_tv_exchange_auto,
+    resolve_tv_fetch_pair,
+)
+from pa_agent.data.tv_symbol_lookup import TvSymbolNotFoundError, is_tv_name_input
 from pa_agent.data.tradingview_errors import format_tradingview_fetch_error
 
 logger = logging.getLogger(__name__)
+
+_TV_FETCH_RETRIES = 3
+_TV_FETCH_RETRY_SLEEP_S = 1.2
 
 # Map our timeframe strings to tvDatafeed Interval enum names
 _TF_MAP: dict[str, str] = {
@@ -31,7 +41,7 @@ _TF_MAP: dict[str, str] = {
     "1M":  "in_monthly",
 }
 
-# Forex / spot gold feeds first (user may type others)
+# Forex / spot gold and China A-share (tvDatafeed exchange ids)
 TV_EXCHANGE_PRESETS: tuple[str, ...] = (
     "OANDA",
     "PEPPERSTONE",
@@ -39,6 +49,9 @@ TV_EXCHANGE_PRESETS: tuple[str, ...] = (
     "FX",
     "TVC",
     "CAPITALCOM",
+    "SSE",
+    "SZSE",
+    "HKEX",
     "",
 )
 
@@ -89,7 +102,18 @@ class TradingViewSource(DataSource):
     # ── Discovery ─────────────────────────────────────────────────────────────
 
     def list_symbols(self) -> list[str]:
-        return ["XAUUSD", "GOLD", "XAGUSD", "EURUSD", "GBPUSD"]
+        return [
+            "XAUUSD",
+            "GOLD",
+            "600519",
+            "000001",
+            "1810",
+            "700",
+            "小米集团",
+            "腾讯控股",
+            "EURUSD",
+            "GBPUSD",
+        ]
 
     def supported_timeframes(self) -> list[str]:
         return list(_TF_MAP.keys())
@@ -100,23 +124,12 @@ class TradingViewSource(DataSource):
         if timeframe not in _TF_MAP:
             raise ValueError(f"Unsupported timeframe: {timeframe!r}. Use one of {list(_TF_MAP)}")
         self._timeframe = timeframe
-        req_ex = self._exchange
-        ex, sym, adjusted = resolve_tv_gold_pair(req_ex, symbol)
-        self._exchange = ex
-        self._symbol = sym
-        if adjusted:
-            logger.warning(
-                "TradingView pair adjusted to %s:%s (was %s:%s)",
-                ex,
-                sym,
-                req_ex or "(auto)",
-                symbol.strip(),
-            )
+        self._symbol = symbol.strip()
         logger.info(
             "TradingViewSource subscribed: %s %s exchange=%s",
             self._symbol,
             timeframe,
-            self._exchange,
+            self._exchange or "(auto)",
         )
 
     def unsubscribe(self) -> None:
@@ -126,6 +139,84 @@ class TradingViewSource(DataSource):
 
     # ── Data fetch ────────────────────────────────────────────────────────────
 
+    def _fetch_hist_with_retry(
+        self,
+        *,
+        symbol: str,
+        exchange: str,
+        interval: object,
+        n_bars: int,
+    ):
+        """Call tvDatafeed get_hist with retries (timeouts / empty are common)."""
+        last_exc: BaseException | None = None
+        for attempt in range(1, _TV_FETCH_RETRIES + 1):
+            try:
+                df = self._tv.get_hist(
+                    symbol=symbol,
+                    exchange=exchange,
+                    interval=interval,
+                    n_bars=n_bars,
+                )
+                if df is not None and not df.empty:
+                    return df
+                last_exc = None
+            except Exception as exc:
+                last_exc = exc
+                logger.debug(
+                    "TradingView get_hist attempt %s/%s failed: %s",
+                    attempt,
+                    _TV_FETCH_RETRIES,
+                    exc,
+                )
+            if attempt < _TV_FETCH_RETRIES:
+                time.sleep(_TV_FETCH_RETRY_SLEEP_S)
+        if last_exc is not None:
+            raise last_exc
+        return None
+
+    def _fetch_equity_auto_exchange(
+        self,
+        *,
+        symbol: str,
+        interval: object,
+        n_bars: int,
+    ) -> tuple[object, str]:
+        """Try HKEX / SSE / SZSE (per probe plan) until one returns bars."""
+        plan = equity_tv_auto_probe_plan(symbol)
+        if not plan:
+            raise DataSourceTransientError(
+                f"TradingView 无法识别品种「{symbol}」；"
+                "请用 A 股 6 位代码、港股代码（如 1810）或已支持的股票名称"
+            )
+        last_exc: BaseException | None = None
+        tried: list[str] = []
+        for exchange, code in plan:
+            label = f"{exchange}:{code}"
+            tried.append(label)
+            try:
+                df = self._fetch_hist_with_retry(
+                    symbol=code,
+                    exchange=exchange,
+                    interval=interval,
+                    n_bars=n_bars,
+                )
+            except Exception as exc:
+                last_exc = exc
+                logger.info("TradingView auto probe %s failed: %s", label, exc)
+                continue
+            if df is not None and not df.empty:
+                logger.info(
+                    "TradingView auto probe picked %s (tried %s)",
+                    label,
+                    ", ".join(tried),
+                )
+                return df, exchange
+        if last_exc is not None:
+            raise last_exc
+        raise DataSourceTransientError(
+            f"TradingView 自动探测失败（{symbol}）：已尝试 {', '.join(tried)} 均无 K 线"
+        )
+
     def latest_snapshot(self, n: int) -> list[KlineBar]:
         """Return *n* bars newest-first; bars[0] is the forming (unclosed) bar."""
         if self._tv is None:
@@ -133,31 +224,53 @@ class TradingViewSource(DataSource):
         if not self._symbol or not self._timeframe:
             raise DataSourceTransientError("TradingView 未订阅品种/周期")
 
-        exchange, symbol, adjusted = resolve_tv_gold_pair(self._exchange, self._symbol)
-        if adjusted:
-            self._exchange = exchange
-            self._symbol = symbol
+        user_symbol = self._symbol
+        req_exchange = self._exchange
+        exchange = req_exchange or ""
+        fetch_symbol = user_symbol
+        auto_equity = is_tv_exchange_auto(req_exchange) and bool(
+            equity_tv_auto_probe_plan(user_symbol)
+        )
         try:
             from tvDatafeed import Interval  # type: ignore[import]
             interval = getattr(Interval, _TF_MAP[self._timeframe])
-            df = self._tv.get_hist(
-                symbol=symbol,
-                exchange=exchange,
-                interval=interval,
-                n_bars=n + 1,
-            )
+            if auto_equity:
+                df, exchange = self._fetch_equity_auto_exchange(
+                    symbol=user_symbol,
+                    interval=interval,
+                    n_bars=n + 1,
+                )
+            else:
+                try:
+                    exchange, fetch_symbol = resolve_tv_fetch_pair(
+                        req_exchange, user_symbol
+                    )
+                except TvSymbolNotFoundError as exc:
+                    raise DataSourceTransientError(str(exc)) from exc
+                df = self._fetch_hist_with_retry(
+                    symbol=fetch_symbol,
+                    exchange=exchange,
+                    interval=interval,
+                    n_bars=n + 1,
+                )
+        except DataSourceTransientError:
+            raise
         except Exception as exc:
             msg = format_tradingview_fetch_error(
-                symbol, exchange, cause=exc,
+                user_symbol, exchange or req_exchange or "自动", cause=exc,
             )
             logger.warning("TradingView fetch failed: %s", exc)
             raise DataSourceTransientError(msg) from exc
 
         if df is None or df.empty:
             msg = format_tradingview_fetch_error(
-                symbol, exchange, empty_data=True,
+                user_symbol, exchange or req_exchange or "自动", empty_data=True,
             )
-            logger.debug("TradingView empty data for %s exchange=%s", symbol, exchange or "(auto)")
+            logger.debug(
+                "TradingView empty data for %s exchange=%s",
+                user_symbol,
+                exchange or req_exchange or "(auto)",
+            )
             raise DataSourceTransientError(msg)
 
         df = df.iloc[::-1].reset_index()
@@ -165,7 +278,7 @@ class TradingViewSource(DataSource):
         bars: list[KlineBar] = []
         for i, row in enumerate(df.itertuples(index=False)):
             ts_ms = _row_ts_ms(row)
-            bars.append(KlineBar(
+            bar = KlineBar(
                 seq=i + 1,
                 ts_open=ts_ms,
                 open=float(row.open),
@@ -173,8 +286,22 @@ class TradingViewSource(DataSource):
                 low=float(row.low),
                 close=float(row.close),
                 volume=float(getattr(row, "volume", 0.0)),
-                closed=(i != 0),
-            ))
+                closed=True,
+            )
+            if i == 0:
+                bar = KlineBar(
+                    seq=bar.seq,
+                    ts_open=bar.ts_open,
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                    closed=is_bar_still_forming(
+                        bar, self._timeframe, symbol=self._symbol
+                    ),
+                )
+            bars.append(bar)
             if len(bars) >= n:
                 break
 

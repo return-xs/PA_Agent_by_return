@@ -197,7 +197,8 @@ def test_gate_unknown_response_contains_unpredictable_prediction() -> None:
 
 def test_gate_wait_prediction_passes_schema() -> None:
     """Short-circuit response with unpredictable prediction must pass full Stage 2 validation."""
-    from pa_agent.ai.json_validator import JsonValidator, Ok
+    from pa_agent.ai.json_validator import Ok
+    from tests.fixtures.validators import schema_test_validator
 
     stage1 = {
         "cycle_position": "unknown",
@@ -217,5 +218,5 @@ def test_gate_wait_prediction_passes_schema() -> None:
     }
     s2 = build_stage2_gate_wait_response(stage1)
     import json
-    result = JsonValidator().validate("stage2", json.dumps(s2, ensure_ascii=False))
+    result = schema_test_validator().validate("stage2", json.dumps(s2, ensure_ascii=False))
     assert isinstance(result, Ok), f"Expected Ok, got {result}"

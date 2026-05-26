@@ -4,8 +4,13 @@ from __future__ import annotations
 import json
 import pytest
 from pa_agent.ai.json_validator import JsonValidator, Ok, ValidationError
+from pa_agent.config.settings import ValidationSettings
+from tests.fixtures.gate_trace import make_bar_by_bar_summary, make_mandatory_gate_trace_proceed
 
-validator = JsonValidator()
+from tests.fixtures.validators import schema_test_validator, strict_test_validator
+
+validator = strict_test_validator()
+lenient_validator = schema_test_validator()
 
 # ── Minimal valid Stage 1 object ──────────────────────────────────────────────
 
@@ -21,26 +26,8 @@ def _valid_stage1() -> dict:
         "entry_setup": "pullback to EMA20",
         "strategy_files_needed": ["上涨通道分析识别.txt"],
         "risk_warning": "watch for reversal",
-        "bar_by_bar_summary": [
-            {
-                "bar": "K1",
-                "role": "structure",
-                "bar_type": "trend_bull",
-                "context_effect": "strengthens_bull",
-                "follow_through": "pending",
-                "trapped_side": "none",
-                "reason": "最新K线支持多头结构",
-            }
-        ],
-        "gate_trace": [
-            {
-                "node_id": "0.1",
-                "question": "是否看得懂当前市场？",
-                "answer": "是",
-                "reason": "ok",
-                "bar_range": "K100-K1",
-            }
-        ],
+        "bar_by_bar_summary": make_bar_by_bar_summary(5),
+        "gate_trace": make_mandatory_gate_trace_proceed(max_seq=5),
         "gate_result": "proceed",
     }
 
@@ -75,28 +62,28 @@ def _valid_stage2() -> dict:
                 "node_id": "9.1",
                 "question": "信号K线是否已经收盘？",
                 "answer": "是",
-                "reason": "已收盘",
+                "reason": "信号K线已收盘，质量可接受，可作为入场依据继续评估。",
                 "bar_range": "K1",
             },
             {
                 "node_id": "10.1",
                 "question": "是否能明确止损？",
                 "answer": "是",
-                "reason": "可定义",
+                "reason": "止损可放在信号棒外侧，距离在可接受范围内，满足阶段二风控要求。",
                 "bar_range": "K1",
             },
             {
                 "node_id": "10.2",
                 "question": "止损是否过大？",
                 "answer": "否",
-                "reason": "合理",
-                "bar_range": "K30-K1",
+                "reason": "止损距离相对结构合理，未超过通道宽度约束，可继续评估方程。",
+                "bar_range": "K5-K1",
             },
             {
                 "node_id": "10.3",
                 "question": "交易者方程是否通过？",
                 "answer": "否",
-                "reason": "RR不足",
+                "reason": "按 entry/stop/target 计算 RR 不足，方程不通过，放弃下单。",
                 "bar_range": "K1",
             },
         ],
@@ -185,7 +172,7 @@ def test_stage1_bar_role_alias_is_normalized():
     """Common bar_by_bar_summary role aliases are accepted and normalized."""
     obj = _valid_stage1()
     obj["bar_by_bar_summary"][0]["role"] = "continuation"
-    result = validator.validate("stage1", json.dumps(obj))
+    result = lenient_validator.validate("stage1", json.dumps(obj))
     assert isinstance(result, Ok), f"Expected Ok, got {result}"
     assert result.obj["bar_by_bar_summary"][0]["role"] == "confirmation"
 
@@ -219,13 +206,24 @@ def test_markdown_fenced_json_is_accepted():
     assert isinstance(result, Ok)
 
 
-def test_truncated_stage1_after_bar_by_bar_summary_is_repaired():
-    """JSON cut off after bar_by_bar_summary is closed and gate fields injected."""
+def test_truncated_stage1_after_bar_by_bar_summary_fails_by_default():
+    """Strict mode does not inject stub gate_trace on truncation."""
     obj = _valid_stage1()
     del obj["gate_trace"]
     del obj["gate_result"]
     truncated = json.dumps(obj, ensure_ascii=False)[:-1] + ","
     result = validator.validate("stage1", truncated)
+    assert isinstance(result, ValidationError)
+    assert result.category == "a"
+
+
+def test_truncated_stage1_can_repair_when_lenient_config():
+    """Legacy tail inject only when disable_truncation_repair=False."""
+    obj = _valid_stage1()
+    del obj["gate_trace"]
+    del obj["gate_result"]
+    truncated = json.dumps(obj, ensure_ascii=False)[:-1] + ","
+    result = lenient_validator.validate("stage1", truncated)
     assert isinstance(result, Ok), result
     assert result.obj["gate_result"] == "unknown"
     assert len(result.obj["gate_trace"]) >= 1

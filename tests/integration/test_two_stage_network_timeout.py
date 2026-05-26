@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import openai
 
-from pa_agent.ai.json_validator import JsonValidator
+from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
 from pa_agent.util.threading import CancelToken, OrchestratorEvent
@@ -20,7 +20,7 @@ def test_network_timeout_stage1(frame, pending_writer, assembler, exp_reader):
     # openai.APITimeoutError requires a `request` parameter
     client.stream_chat.side_effect = openai.APITimeoutError(request=MagicMock())
 
-    validator = JsonValidator()
+    validator = schema_test_validator()
     orchestrator = TwoStageOrchestrator(
         client=client,
         assembler=assembler,

@@ -15,7 +15,9 @@ from pa_agent.ai.json_validator import (
 )
 
 _SAMPLE = Path(__file__).resolve().parents[2] / "tools" / "stage2_raw_sample.txt"
-_validator = JsonValidator()
+from tests.fixtures.validators import schema_test_validator
+
+_validator = schema_test_validator()
 
 
 def test_stage2_raw_sample_repair_then_parse():

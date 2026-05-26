@@ -13,8 +13,14 @@ Coordinates the full Stage 1 (diagnosis) → Stage 2 (decision) pipeline:
 
 Cancel checks are performed before each stage and after each API call.
 Network/timeout errors are caught and recorded on the partial record.
+
+Stage 2 validation failure ends the run immediately (``STAGE2_VALIDATION_AUTO_RETRY``
+is always False): no second ``stream_chat`` and no automatic fix-and-revalidate loop.
 """
 from __future__ import annotations
+
+# Explicit policy: never re-call Stage 2 API after validation failure.
+STAGE2_VALIDATION_AUTO_RETRY = False
 
 import dataclasses
 import logging
@@ -85,17 +91,23 @@ def _json_truncation_hint(content: str, err: ValidationError) -> str | None:
 
 def _enrich_stage2_validation_message(err: ValidationError, reply: Any) -> str:
     """Add actionable context for empty content or truncated JSON."""
+    from pa_agent.ai.validation_messages import format_validation_errors
+
+    detail = format_validation_errors(
+        err.invalid_fields, missing_fields=err.missing_fields
+    )
     content = (getattr(reply, "content", None) or "").strip()
     trunc = _json_truncation_hint(content, err)
     if trunc:
         usage = getattr(reply, "usage", None)
         completion = getattr(usage, "completion_tokens", 0) if usage else 0
         reasoning_len = len(getattr(reply, "reasoning_content", None) or "")
-        return f"{err.message}。{trunc} completion_tokens≈{completion}，思考区约 {reasoning_len} 字。"
+        msg = f"{err.message}。{trunc} completion_tokens≈{completion}，思考区约 {reasoning_len} 字。"
+        return f"{msg}。{detail}" if detail else msg
     if err.category != "d" or (err.raw_text or "").strip():
-        return err.message
+        return f"{err.message}。{detail}" if detail else err.message
     if content:
-        return err.message
+        return f"{err.message}。{detail}" if detail else err.message
     reasoning = getattr(reply, "reasoning_content", None) or ""
     usage = getattr(reply, "usage", None)
     completion = getattr(usage, "completion_tokens", 0) if usage else 0
@@ -111,22 +123,28 @@ def _enrich_stage2_validation_message(err: ValidationError, reply: Any) -> str:
             f"{err.message}：正文 content 为空；请把阶段二 JSON 写在 content 正文，"
             "不要只写在思考区。"
         )
-    return err.message
+    return f"{err.message}。{detail}" if detail else err.message
 
 
 def _enrich_stage1_validation_message(err: ValidationError, reply: Any) -> str:
     """Add actionable context for empty content or truncated JSON."""
+    from pa_agent.ai.validation_messages import format_validation_errors
+
+    detail = format_validation_errors(
+        err.invalid_fields, missing_fields=err.missing_fields
+    )
     content = (getattr(reply, "content", None) or "").strip()
     trunc = _json_truncation_hint(content, err)
     if trunc:
         usage = getattr(reply, "usage", None)
         completion = getattr(usage, "completion_tokens", 0) if usage else 0
         reasoning_len = len(getattr(reply, "reasoning_content", None) or "")
-        return f"{err.message}。{trunc} completion_tokens≈{completion}，思考区约 {reasoning_len} 字。"
+        msg = f"{err.message}。{trunc} completion_tokens≈{completion}，思考区约 {reasoning_len} 字。"
+        return f"{msg}。{detail}" if detail else msg
     if err.category != "d" or (err.raw_text or "").strip():
-        return err.message
+        return f"{err.message}。{detail}" if detail else err.message
     if content:
-        return err.message
+        return f"{err.message}。{detail}" if detail else err.message
     reasoning = getattr(reply, "reasoning_content", None) or ""
     usage = getattr(reply, "usage", None)
     completion = getattr(usage, "completion_tokens", 0) if usage else 0
@@ -142,7 +160,7 @@ def _enrich_stage1_validation_message(err: ValidationError, reply: Any) -> str:
             f"{err.message}：正文 content 为空；请把阶段一 JSON 写在 content 正文，"
             "不要只写在思考区。"
         )
-    return err.message
+    return f"{err.message}。{detail}" if detail else err.message
 
 
 def _emit_buffered_stream(
@@ -435,7 +453,17 @@ class TwoStageOrchestrator:
         )
         print("="*80 + "\n")
 
-        result_s1 = self._validator.validate("stage1", reply_s1.content)
+        prev_s1: dict[str, Any] | None = None
+        if previous_record is not None and int(incremental_new_bar_count or 0) > 0:
+            prev_s1 = previous_record.stage1_diagnosis
+
+        result_s1 = self._validator.validate(
+            "stage1",
+            reply_s1.content,
+            kline_frame=frame,
+            incremental_new_bar_count=int(incremental_new_bar_count or 0),
+            incremental_previous_stage1=prev_s1,
+        )
 
         if isinstance(result_s1, ValidationError):
             err = result_s1
@@ -481,7 +509,23 @@ class TwoStageOrchestrator:
 
         # ── Step 11: Load experience entries ──────────────────────────────────
         cycle_position: str = stage1_json.get("cycle_position", "unknown")
-        experience_entries = self._exp_reader.read_top5(cycle_position)
+        direction = str(stage1_json.get("direction", "") or "")
+        patterns = stage1_json.get("detected_patterns") or []
+        prompt_cfg = getattr(self._settings, "prompt", None) if self._settings else None
+        max_exp = getattr(prompt_cfg, "experience_max_entries", 3) if prompt_cfg else 3
+        max_chars = (
+            getattr(prompt_cfg, "experience_max_chars_per_entry", 400) if prompt_cfg else 400
+        )
+        if hasattr(self._exp_reader, "read_for_stage2"):
+            experience_entries = self._exp_reader.read_for_stage2(
+                cycle_position,
+                direction=direction,
+                patterns=patterns,
+                max_entries=max_exp,
+                max_chars_per_entry=max_chars,
+            )
+        else:
+            experience_entries = self._exp_reader.read_top5(cycle_position)[:max_exp]
 
         # ── Step 12: Pre-Stage-2 cancel check ────────────────────────────────
         if cancel_token.is_set():
@@ -671,6 +715,7 @@ class TwoStageOrchestrator:
             reply_s2.content,
             decision_stance=record.meta.decision_stance,
             kline_frame=frame,
+            stage1_json=stage1_json,
         )
 
         if isinstance(result_s2, ValidationError):

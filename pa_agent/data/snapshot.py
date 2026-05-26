@@ -1,59 +1,90 @@
 """KlineFrame snapshot builder."""
 from __future__ import annotations
 
-import copy
-from typing import TYPE_CHECKING
+import math
 
+from pa_agent.data.bar_close_wait import has_forming_bar_at_head
 from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
-from pa_agent.data.kline_buffer import KlineBuffer
 from pa_agent.util.timefmt import now_local_ms
 
-if TYPE_CHECKING:
-    pass
+
+def frame_is_pure_closed(frame: KlineFrame) -> bool:
+    """True when every bar on the frame is marked closed (no forming slot)."""
+    return bool(frame.bars) and all(b.closed for b in frame.bars)
 
 
-def take_snapshot(buffer: KlineBuffer, n: int, symbol: str, timeframe: str) -> KlineFrame:
-    """Build an immutable KlineFrame from the *n* most recent bars in *buffer*.
+def frames_equal_for_chart(a: KlineFrame, b: KlineFrame) -> bool:
+    """True when two frames would render the same candles and EMA (ignore snapshot time)."""
+    if a.symbol != b.symbol or a.timeframe != b.timeframe:
+        return False
+    if len(a.bars) != len(b.bars):
+        return False
+    if a.bars != b.bars:
+        return False
+    return _indicators_equal(a.indicators, b.indicators)
 
-    Sequence numbering:
-    - bars[0].seq == 1, closed == False  (the forming bar)
-    - bars[i].seq == i+1, closed == True  for i >= 1
-    - {bar.seq for bar in bars} == {1, ..., n}  (bijection)
 
-    Raises ValueError if the buffer has fewer than *n* bars.
+def _indicators_equal(a: IndicatorBundle, b: IndicatorBundle) -> bool:
+    if len(a.ema20) != len(b.ema20) or len(a.atr14) != len(b.atr14):
+        return False
+    for x, y in zip(a.ema20, b.ema20, strict=True):
+        if not _float_equal(x, y):
+            return False
+    for x, y in zip(a.atr14, b.atr14, strict=True):
+        if not _float_equal(x, y):
+            return False
+    return True
+
+
+def _float_equal(a: float, b: float) -> bool:
+    if math.isnan(a) and math.isnan(b):
+        return True
+    return a == b
+
+
+def take_snapshot_from_bars(
+    bars_raw: list[KlineBar],
+    n: int,
+    symbol: str,
+    timeframe: str,
+) -> KlineFrame:
+    """Build an analysis KlineFrame from a newest-first bar list (same as AI table).
+
+    Uses ``build_analysis_frame``: *n* newest **closed** bars; skips an unclosed
+    bar at index 0 when present.
+
+    Raises ValueError if insufficient bars are available.
     """
-    raw = buffer.last_n_including_forming(n)
-    if len(raw) < n:
+    frame = build_analysis_frame(bars_raw, n, symbol, timeframe)
+    if frame is None:
         raise ValueError(
-            f"Buffer has only {len(raw)} bars; requested {n}. "
-            "Wait for more data before taking a snapshot."
+            f"Need at least {n} closed bars (or {n + 1} with a forming bar at index 0); "
+            f"got {len(bars_raw)}."
         )
+    return frame
 
-    # Re-assign seq numbers to guarantee the bijection invariant
-    bars: list[KlineBar] = []
-    for i, bar in enumerate(raw[:n]):
-        bars.append(
-            KlineBar(
-                seq=i + 1,
-                ts_open=bar.ts_open,
-                open=bar.open,
-                high=bar.high,
-                low=bar.low,
-                close=bar.close,
-                volume=bar.volume,
-                closed=(i != 0),   # index 0 is always the forming bar
-            )
-        )
 
-    indicators = compute_indicators(bars)
+def _newest_closed_slice(
+    bars_raw: list[KlineBar],
+    n: int,
+    *,
+    timeframe: str = "",
+    symbol: str = "",
+) -> list[KlineBar] | None:
+    """Return *n* newest closed bars from a newest-first list.
 
-    return KlineFrame(
-        symbol=symbol,
-        timeframe=timeframe,
-        bars=tuple(bars),
-        indicators=indicators,
-        snapshot_ts_local_ms=now_local_ms(),
-    )
+    Skips index 0 only when it is still forming. Stale ``closed=False`` after
+    halt (e.g. TradingView) is kept as K1.
+    """
+    if not bars_raw or n < 1:
+        return None
+    if has_forming_bar_at_head(bars_raw, timeframe or None, symbol=symbol or None):
+        if len(bars_raw) < n + 1:
+            return None
+        return list(bars_raw[1 : n + 1])
+    if len(bars_raw) < n:
+        return None
+    return list(bars_raw[:n])
 
 
 def compute_indicators(bars: list[KlineBar]) -> IndicatorBundle:
@@ -103,10 +134,18 @@ def build_live_frame(
     This is for UI only. The analysis snapshot must still use
     ``build_analysis_frame`` so AI always sees closed-only candles.
     """
-    if len(bars_raw) < n_closed + 1:
-        return None
+    has_forming = has_forming_bar_at_head(
+        bars_raw, timeframe or None, symbol=symbol or None
+    )
+    if has_forming:
+        if len(bars_raw) < n_closed + 1:
+            return None
+        raw = bars_raw[: n_closed + 1]
+    else:
+        if len(bars_raw) < n_closed:
+            return None
+        raw = bars_raw[:n_closed]
 
-    raw = bars_raw[: n_closed + 1]  # forming + N closed
     rebased: list[KlineBar] = [
         KlineBar(
             seq=i + 1,
@@ -116,7 +155,7 @@ def build_live_frame(
             low=b.low,
             close=b.close,
             volume=b.volume,
-            closed=(i != 0),
+            closed=not (has_forming and i == 0),
         )
         for i, b in enumerate(raw)
     ]
@@ -138,16 +177,17 @@ def build_analysis_frame(
 ) -> KlineFrame | None:
     """Build a snapshot for AI analysis: *n* newest **closed** bars only.
 
-    *bars_raw* is newest-first; ``bars_raw[0]`` is the forming (unclosed) bar
-    and is discarded. Returns None if fewer than ``n + 1`` bars are available.
+    *bars_raw* is newest-first. If ``bars_raw[0].closed`` is False it is the
+    forming bar and is discarded; otherwise all entries are treated as closed.
 
     Chart and AI must both use this (or ``build_display_frame``) so K-line
     seq numbers refer to the same candles.
     """
-    if len(bars_raw) < n + 1:
+    closed_raw = _newest_closed_slice(
+        bars_raw, n, timeframe=timeframe, symbol=symbol
+    )
+    if closed_raw is None:
         return None
-
-    closed_raw = bars_raw[1 : n + 1]
     rebased: list[KlineBar] = [
         KlineBar(
             seq=i + 1,
