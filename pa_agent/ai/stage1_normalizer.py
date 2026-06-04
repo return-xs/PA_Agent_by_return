@@ -230,7 +230,7 @@ def _incremental_summary_from_risk_warning(risk_warning: str) -> str | None:
         idx = text.find(marker)
         if idx >= 0:
             chunk = text[idx:].split("。", 1)[0].strip()
-            if len(chunk) >= 16:
+            if len(chunk) >= 1:
                 return chunk + ("。" if not chunk.endswith("。") else "")
     return None
 
@@ -260,7 +260,7 @@ def _fill_incremental_delta(
         )
 
     summary = str(delta.get("summary", "") or "").strip()
-    if len(summary) < 16:
+    if len(summary) < 1:
         from_rw = _incremental_summary_from_risk_warning(
             str(out.get("risk_warning", "") or "")
         )

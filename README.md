@@ -264,7 +264,7 @@ PA_Agent/
 | ------------------------------------ | -------------- |
 | `[CONTRIBUTING.md](CONTRIBUTING.md)` | 开发环境、测试与 PR 约定 |
 | `[SECURITY.md](SECURITY.md)`         | 漏洞与密钥泄露报告方式    |
-| `[LICENSE](LICENSE)`                 | MIT 许可证        |
+| `[LICENSE](LICENSE)`                 | AGPL-3.0 许可证  |
 
 
 ---
@@ -334,7 +334,7 @@ pip install -e ".[dev]"
 
 ---
 
-本项目采用 [MIT License](LICENSE) 发布。
+本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE) 发布。
 
 ---
 

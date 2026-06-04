@@ -130,6 +130,11 @@ def validate_trace_semantics(
         if nid:
             node_ids.append(nid)
 
+        # Skip semantic checks for auto-injected nodes (added by coherence_checks,
+        # not by the model — their question text intentionally differs from the tree).
+        if item.get("_auto_injected"):
+            continue
+
         if item.get("skipped") and item.get("answer") == "不适用":
             continue
 

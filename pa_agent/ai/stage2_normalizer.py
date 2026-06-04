@@ -230,7 +230,7 @@ def _normalize_next_cycle_prediction(prediction: dict[str, Any]) -> None:
         prediction["probabilities"] = None
         return
 
-    # 4. probabilities integer rounding and clamping
+    # 4. probabilities integer rounding, clamping, and sum normalization
     probs = prediction.get("probabilities")
     if isinstance(probs, dict):
         normalized: dict[str, int] = {}
@@ -241,6 +241,23 @@ def _normalize_next_cycle_prediction(prediction: dict[str, Any]) -> None:
             except (TypeError, ValueError):
                 value = 0
             normalized[key] = max(0, min(100, value))
+
+        # Auto-rescale if sum is outside [99, 101] (model arithmetic error)
+        total = sum(normalized[k] for k in CYCLE_ORDER)
+        if total > 0 and not (99 <= total <= 101):
+            scale = 100.0 / total
+            rescaled = {k: int(round(normalized[k] * scale)) for k in CYCLE_ORDER}
+            # Fix rounding residual so sum == 100
+            diff = 100 - sum(rescaled[k] for k in CYCLE_ORDER)
+            if diff != 0:
+                # Add/subtract from the largest bucket
+                biggest = max(CYCLE_ORDER, key=lambda k: rescaled[k])
+                rescaled[biggest] = max(0, rescaled[biggest] + diff)
+            normalized = rescaled
+            logger.debug(
+                "next_cycle_prediction probabilities rescaled (sum was %d -> 100)", total
+            )
+
         prediction["probabilities"] = normalized
 
         # 5. cycle = argmax, tie-break by CYCLE_ORDER literal order
@@ -303,13 +320,29 @@ def _normalize_next_bar_prediction(prediction: dict[str, Any]) -> None:
     probs = prediction.get("probabilities")
     if isinstance(probs, dict):
         normalized: dict[str, int] = {}
-        for key in ("bullish", "bearish", "neutral"):
+        bar_order = ("bullish", "bearish", "neutral")
+        for key in bar_order:
             raw = probs.get(key)
             try:
                 value = int(round(float(raw))) if raw is not None else 0
             except (TypeError, ValueError):
                 value = 0
             normalized[key] = max(0, min(100, value))
+
+        # Auto-rescale if sum is outside [99, 101] (model arithmetic error)
+        total = sum(normalized[k] for k in bar_order)
+        if total > 0 and not (99 <= total <= 101):
+            scale = 100.0 / total
+            rescaled = {k: int(round(normalized[k] * scale)) for k in bar_order}
+            diff = 100 - sum(rescaled[k] for k in bar_order)
+            if diff != 0:
+                biggest = max(bar_order, key=lambda k: rescaled[k])
+                rescaled[biggest] = max(0, rescaled[biggest] + diff)
+            normalized = rescaled
+            logger.debug(
+                "next_bar_prediction probabilities rescaled (sum was %d -> 100)", total
+            )
+
         prediction["probabilities"] = normalized
 
         # 5. direction = argmax (R3.3) — respect model choice on ties

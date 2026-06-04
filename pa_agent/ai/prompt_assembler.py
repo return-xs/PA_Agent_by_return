@@ -87,7 +87,9 @@ _STAGE1_TAIL_REMINDER = (
 _STAGE2_TAIL_REMINDER = (
     "【最后一步·必做】思考结束后，立即在 assistant 正文 `content` 输出完整阶段二裸 JSON"
     "（含 decision、decision_trace、terminal）。思考用简体中文并尽量简洁；`content` 不得为空。"
-    "若 token 紧张，优先保证 `content` 有 JSON，可缩短思考。"
+    "若 token 紧张，优先保证 `content` 有 JSON，可缩短思考。\n"
+    "⚠️ 禁止在 content 中只写思考过程或分隔符（如 ---输出JSON---）而不附 JSON——"
+    "这会导致校验直接失败。哪怕只输出最小骨架 {\"decision\":{\"order_type\":\"不下单\",...}} 也比没有强。"
 ).strip()
 
 # ── Hardcoded output format reminders ─────────────────────────────────────────
@@ -308,12 +310,15 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 
 **⚠️ diagnosis_summary.direction 与阶段一 direction 不一致时的强制规则：**
 - `diagnosis_summary.direction` 必须与 `stage1.direction` **保持一致**，除非你在阶段二的 decision_trace 中以 **node_id="2.3"** 明确记录方向变更及原因。
-- 若阶段一 direction=neutral 而你判断阶段二 direction=bullish/bearish，**必须**在 decision_trace 中加入：
+- **例外（无需 2.3 节点）**：
+  - 阶段一 direction=**neutral** → 阶段二 direction=bullish/bearish：程序判不了方向时 AI 阶段二识别出方向属于正常补充，校验器已尅5豪免。不强制补写 2.3，但建议补（给本人看更清晰）。
+  - 阶段二 将 direction 覆盖为 neutral 且周期属于震荡类（trading_range / extreme_tr / trending_tr）时。
+- 若阶段一 direction=bullish/bearish，而阶段二判断方向反转，**必须**在 decision_trace 中加入：
   ```json
-  {"node_id": "2.3", "section": "方向重判", "question": "阶段二是否重新判定市场方向？", "answer": "是", "branch": "bullish", "reason": "说明为何阶段二认为方向从neutral变为bullish的具体依据（如EMA斜率变化、结构突破等）", "skipped": false, "bar_range": "由你填写"}
+  {"node_id": "2.3", "section": "方向重判", "question": "阶段二是否重新判定市场方向？", "answer": "是", "branch": "bullish", "reason": "说明为何方向改变的具体依据", "skipped": false, "bar_range": "由你填写"}
   ```
-  做空方向则 `"branch": "bearish"`。**`branch` 字段必须填写且值必须与 `diagnosis_summary.direction` 完全一致**（`bullish` 或 `bearish`），校验器依赖此字段识别方向变更，缺少 `branch` 或写中文（"做多"/"做空"）均会导致校验失败。
-- 若未加此节点而 direction 不同，校验器**必定报错**，分析将失败。最稳妥的做法是：**让 diagnosis_summary.direction 直接沿用阶段一的 direction 值**，只在有充分依据且愿意补写 2.3 节点时才覆盖。
+  做空方向则 `"branch": "bearish"`。**`branch` 字段必须填写且值必须与 `diagnosis_summary.direction` 完全一致**（`bullish` 或 `bearish`）。
+- 其他情况若未加 2.3 节点而 direction 不同，校验器**必定报错**。最稳妥的做法：**让 diagnosis_summary.direction 直接沿用阶段一的 direction 值**，只在有充分依据时才覆盖。
 
 ## 阶段二决策路径（二元决策树 §3–§11、§14）
 
@@ -426,8 +431,10 @@ _NEXT_BAR_PREDICTION_INSTRUCTION = """\
 2. direction 必须等于 probabilities 中数值最大的键；并列最大时取 JSON 出现顺序中靠前的键
    （即按 bullish → bearish → neutral 的字面顺序）。
 3. reasoning 长度 30–1500 字，简体中文，不写下单价格、不写止损止盈，仅讨论方向与概率依据。
-4. features_used 至少包含 "stage1_diagnosis"；若提示词中提供了对应来源，应同步包含
-   "kline_features" / "analysis_history" / "experience_library"。
+4. features_used 合法取值封闭列表（只能从下方选对应值，禁止自造字符串）：
+   "stage1_diagnosis"、"kline_features"、"analysis_history"、"experience_library"、"stage2_decision"、"previous_prediction_summary"。
+   至少包含 "stage1_diagnosis"；若提示词中提供了对应来源，应同步包含
+   "kline_features" / "analysis_history" / "experience_library" / "previous_prediction_summary"。
 5. 数据不足（K 线数 < 8）、或阶段一诊断为 extreme_tr / unknown、或市场极端混乱时：
    设 unpredictable=true，direction=null，probabilities=null，reasoning 写明原因。
 6. 此预测**不**进入交易者方程、**不**改变 decision 中任意字段，仅作辅助参考。
@@ -470,8 +477,10 @@ spike | micro_channel | tight_channel | normal_channel | broad_channel | trendin
 3. direction 为独立的方向预测（bullish / bearish / neutral），不由 cycle argmax 强制推导；
    表达的是预测下一个周期时市场整体偏向的方向。
 4. reasoning 长度 1–1500 字，简体中文，仅讨论周期演变依据，不写下单价格、不写止损止盈。
-5. features_used 至少包含 "stage1_diagnosis"；若提示词中提供了对应来源，应同步包含
-   "kline_features" / "analysis_history" / "experience_library"。
+5. features_used 合法取值封闭列表（只能从下方选对应值，禁止自造字符串）：
+   "stage1_diagnosis"、"kline_features"、"analysis_history"、"experience_library"、"stage2_decision"、"previous_prediction_summary"。
+   至少包含 "stage1_diagnosis"；若提示词中提供了对应来源，应同步包含
+   "kline_features" / "analysis_history" / "experience_library" / "previous_prediction_summary"。
 6. 数据不足（K 线数 < 8）、或阶段一诊断为 extreme_tr / unknown、或市场极端混乱时：
    设 unpredictable=true，cycle=null，direction=null，probabilities=null，reasoning 写明原因。
 7. 此预测**不**进入交易者方程、**不**改变 decision 中任意字段，仅作辅助参考。
@@ -1125,13 +1134,15 @@ class PromptAssembler:
         Structure:
           [0] system    — Stage 2 system prompt (full decision tree, same as Stage 1)
           [1] user      — Stage 1 original user prompt (with K-line table, from stage1_messages)
-          [2] assistant — Stage 1 reply JSON
-          [3] user      — Stage 2 task prompt (without K-line table)
+          [2] user      — Stage 2 task prompt (without K-line table; embeds S1 diagnosis JSON)
 
-        Benefits:
-        - K-line table sent only once (in [1]), not duplicated in [3]
-        - system prompt identical to Stage 1 → prefix caching hits the full prefix
-        - Model can reference Stage 1 K-line data without re-reading
+        Note: the ``assistant`` role is intentionally omitted.  Including it would
+        make ``messages[2]`` (the S2 user turn) unique every cycle because the
+        prefix preceding it changes — the assistant content contains the S1 reply
+        JSON which varies each run.  Without the assistant message, the prefix is:
+          system (static) + user[S1] (static per symbol/tf/barcount)
+        and the S2 user turn only needs to re-send the dynamic diagnosis JSON,
+        keeping the large strategy-file block fully cached.
         """
         system_content = self._build_stage2_system_prompt()
 
@@ -1156,7 +1167,6 @@ class PromptAssembler:
         return [
             {"role": "system",    "content": system_content},
             {"role": "user",      "content": stage1_user_content},
-            {"role": "assistant", "content": stage1_reply_content},
             {"role": "user",      "content": stage2_user_content},
         ]
 
@@ -1235,8 +1245,8 @@ class PromptAssembler:
         prev_pred_block = self._render_previous_prediction(previous_record)
         return (
             "## 阶段二任务\n\n"
-            "继续上一轮对话。你已经完成阶段一诊断；现在只执行阶段二：交易决策、风险收益和下单方式评估。\n"
-            "上一轮 assistant 消息是阶段一完整响应，下面的 JSON 是程序校验通过后的阶段一诊断结果，若两者有细微格式差异，以此处 JSON 为准。\n\n"
+            "你现在独立执行阶段二：交易决策、风险收益和下单方式评估（基于阶段一诊断结果）。\n"
+            "以下 JSON 是程序校验通过后的阶段一诊断结果，请以此为权威依据；阶段一 K 线数据见上方阶段一用户消息。\n\n"
             f"{stage2_context}\n\n"
             "---\n\n"
             f"## 阶段一诊断结果\n\n```json\n"

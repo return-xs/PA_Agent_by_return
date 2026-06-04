@@ -113,7 +113,14 @@ def _strip_fences(text: str) -> str:
     # 去掉除 \t \n \r 外的控制字符（0x00-0x1f 除了这三个）
     t = "".join(ch for ch in t if ch >= " " or ch in "\t\n\r")
 
-    # Fully fenced ```json ... ```
+    # ── Priority: find an embedded ```json ... ``` fence anywhere in text ──
+    # Handles the case where the model outputs prose first, then a fenced block.
+    m_embedded = _FENCE_RE.search(t)
+    if m_embedded:
+        t = m_embedded.group(1).strip()
+        return _repair_unescaped_quotes(_repair_semicolon_separator(_extract_outer_json_object(t)))
+
+    # Fully fenced ```json ... ``` starting at top
     if t.startswith("```"):
         m = _FENCE_RE.search(t)
         if m:
@@ -124,7 +131,7 @@ def _strip_fences(text: str) -> str:
     # Common model mistake: raw JSON + trailing ``` only
     t = _TRAILING_FENCE_RE.sub("", t).strip()
 
-    return _repair_unescaped_quotes(_extract_outer_json_object(t))
+    return _repair_unescaped_quotes(_repair_semicolon_separator(_extract_outer_json_object(t)))
 
 
 # ── Unescaped quote repair ────────────────────────────────────────────────────
@@ -181,6 +188,48 @@ def _repair_unescaped_quotes(text: str) -> str:
     return "".join(out)
 
 
+def _repair_semicolon_separator(text: str) -> str:
+    """Replace stray semicolons used as field separators outside JSON strings.
+
+    Models occasionally write ``"field": "value";`` instead of ``"field": "value",``
+    which is a common typo.  Only replaces ``;`` that appears in struct-separator
+    position (outside a string, followed by optional whitespace then ``"`` or ``}``).
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in ('"', '}', ']'):
+                out.append(",")
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 # ── Truncated JSON repair ───────────────────────────────────────────────────────
 
 def _balance_json_brackets(text: str) -> str:
@@ -212,11 +261,42 @@ def _balance_json_brackets(text: str) -> str:
     return text + closers
 
 
-def _inject_stage1_missing_tail(text: str) -> str:
-    """Append minimal gate fields when the model stopped after bar_by_bar_summary."""
-    lowered = text.lower()
-    if '"gate_result"' in lowered or '"gate_trace"' in lowered:
-        return text
+def _inject_stage2_no_json_stub(raw_text: str) -> str | None:
+    """When stage2 content is pure prose (model forgot to output JSON),
+    return a minimal 不下单 JSON stub so downstream validation can continue
+    and show a more specific error instead of category-d.
+
+    Returns None if the text already contains a JSON object.
+    """
+    stripped = raw_text.strip()
+    # If there's already a '{' somewhere, let normal extraction handle it.
+    if "{" in stripped:
+        return None
+    # Only inject when it looks like a stage2 reasoning dump.
+    # Key markers: the text is Chinese prose, possibly ending with a separator.
+    if len(stripped) < 20:
+        return None
+    stub = (
+        '{"_auto_stub":true,'
+        '"decision":{"order_direction":null,"order_type":"不下单",'
+        '"entry_price":null,"entry_basis_bar":null,"entry_basis_extreme":null,'
+        '"entry_rule":null,"take_profit_price":null,"stop_loss_price":null,'
+        '"reasoning":"模型未输出JSON，程序自动注入不下单骨架（请重新提交分析）",'
+        '"diagnosis_confidence":0,"diagnosis_confidence_reasoning":"",'
+        '"trade_confidence":0,"trade_confidence_reasoning":"",'
+        '"estimated_win_rate":null,"estimated_win_rate_reasoning":"",'
+        '"key_factors":[],"watch_points":[],"risk_assessment":"",'
+        '"invalidation_condition":""},'
+        '"diagnosis_summary":{"cycle_position":"unknown","direction":"neutral","key_signals":[]},'
+        '"bar_analysis":{"always_in":"neutral","last_closed_bar":"K1","bar_type":"other",'
+        '"signal_bar":{"bar":null,"quality":"invalid","pattern":"none","reason":"无JSON输出"},'
+        '"entry_bar":{"bar":null,"strength":"not_triggered","follow_through":false,'
+        '"still_valid":false,"freshness":"invalid"},'
+        '"second_entry":{"is_second_entry":false,"type":"none"}},'
+        '"decision_trace":[],'
+        '"terminal":{"node_id":"AUTO","outcome":"wait","label":"模型未输出JSON，自动降级为等待"}}'
+    )
+    return stub
 
     tail = text.rstrip()
     if not tail.endswith((",", "]", "}")):
@@ -298,12 +378,32 @@ class JsonValidator:
         # ── Category d: plain text (no JSON at all) ───────────────────────────
         stripped = _strip_fences(raw_text)
         if not stripped.startswith("{") and not stripped.startswith("["):
-            return ValidationError(
-                category="d",
-                stage=stage,
-                raw_text=raw_text,
-                message="Response is plain text, not JSON",
-            )
+            # Stage 2 special case: model output pure prose (forgot JSON).
+            # Inject a minimal 不下单 stub so the user gets a clear "model
+            # failed to output JSON" message via the normalizer rather than a
+            # generic category-d error.
+            if stage == "stage2":
+                stub = _inject_stage2_no_json_stub(raw_text)
+                if stub is not None:
+                    logger.warning(
+                        "Stage2 response contained no JSON; injecting 不下单 stub. "
+                        "Raw length=%d", len(raw_text)
+                    )
+                    stripped = stub
+                else:
+                    return ValidationError(
+                        category="d",
+                        stage=stage,
+                        raw_text=raw_text,
+                        message="Response is plain text, not JSON",
+                    )
+            else:
+                return ValidationError(
+                    category="d",
+                    stage=stage,
+                    raw_text=raw_text,
+                    message="Response is plain text, not JSON",
+                )
 
         # ── Category a: syntax error ──────────────────────────────────────────
         try:

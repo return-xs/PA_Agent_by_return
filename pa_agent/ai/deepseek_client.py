@@ -306,6 +306,11 @@ class DeepSeekClient:
             create_kwargs["extra_body"] = extra_body
         if _effort is not None:
             create_kwargs["reasoning_effort"] = _effort
+        # When thinking mode is OFF, set temperature=0 for maximum instruction-following
+        # fidelity and JSON format compliance.  Thinking mode is incompatible with
+        # temperature (DeepSeek/Anthropic spec), so we only inject it when safe.
+        if not _thinking_on:
+            create_kwargs["temperature"] = 0
         try:
             response = client.chat.completions.create(
                 **create_kwargs,
