@@ -62,6 +62,19 @@ _PA_TERMINOLOGY_ZH = """
 英文缩写（可保留）：SB/EB、OB/IB、H1/H2、L1/L2、MTR、AIL/AIS、20GB。
 """.strip()
 
+_STAGE2_API_TASK_RULE = """
+## 阶段二 API 任务模式（硬约束，非聊天）
+
+本次调用是 PA Agent **阶段二的一次独立 API 请求**。提示中虽含阶段一诊断 JSON，**不代表**阶段二已完成或可以收尾对话。
+
+**禁止**输出：
+- 「阶段一和阶段二都已输出完毕」「分析已完成」等会话总结
+- 「告诉我你想怎么处理」「请选择 1/2/3/4」等菜单式追问
+- Markdown 摘要、复盘建议、保存文件提示（除非写在 JSON 字段内）
+
+**必须**：在 assistant 正文 `content` 输出**完整阶段二裸 JSON**（仅此一种交付物）。
+""".strip()
+
 _OPENCLAW_AGENT_NO_TOOLS_RULE = """
 ## PA Agent × QClaw 任务模式（硬约束）
 
@@ -127,6 +140,8 @@ _STAGE2_TAIL_REMINDER = (
     "2. 你有入场方案（entry/stop/target 三价齐全），但 10.3 交易者方程不通过？\n"
     "   → 这才可以写 terminal.outcome=reject，node_id=\"10.3\"。\n"
     "3. 你有入场方案且 10.3 通过？→ terminal.outcome=trade，node_id 为最终节点。\n"
+    "   **禁止**写 action/execute/entry 等自创词，只能是 wait|reject|trade|proceed。\n"
+    "4. 限价/突破尚未触发？→ entry_bar.freshness=pending（禁止 limit_order_pending 等自创词）。\n"
     "常见错误速查：§9.0=否 + §10.1=否 → outcome=wait（不是 reject！）"
 ).strip()
 
@@ -1313,7 +1328,6 @@ class PromptAssembler:
             stage1_json=stage1_json,
             strategy_files=strategy_files,
             experience_entries=experience_entries,
-            include_kline_table=True,
             decision_stance=decision_stance,
         )
         return [
@@ -1367,45 +1381,30 @@ class PromptAssembler:
         decision_stance: str = "conservative",
         previous_record: Any | None = None,
     ) -> list[dict]:
-        """Build Stage 2 as a true continuation of the Stage 1 conversation.
+        """Build Stage 2 as a standalone API turn (decoupled from Stage 1 chat).
 
         Structure:
-          [0] system    — Stage 2 system prompt (full decision tree, same as Stage 1)
-          [1] user      — Stage 1 original user prompt (with K-line table, from stage1_messages)
-          [2] user      — Stage 2 task prompt (without K-line table; embeds S1 diagnosis JSON)
+          [0] system — Stage 2 system prompt
+          [1] user   — Stage 2 task + compact stage1 JSON + K-line tables
 
-        Note: the ``assistant`` role is intentionally omitted.  Including it would
-        make ``messages[2]`` (the S2 user turn) unique every cycle because the
-        prefix preceding it changes — the assistant content contains the S1 reply
-        JSON which varies each run.  Without the assistant message, the prefix is:
-          system (static) + user[S1] (static per symbol/tf/barcount)
-        and the S2 user turn only needs to re-send the dynamic diagnosis JSON,
-        keeping the large strategy-file block fully cached.
+        We intentionally **do not** prepend the Stage 1 user turn.  OpenClaw Agent
+        often misreads ``system + stage1_user + stage2_user`` as a finished
+        two-phase chat and replies with prose menus (category=d retries).
         """
+        del stage1_messages, stage1_reply_content  # kept for call-site compatibility
         system_content = self._build_stage2_system_prompt()
-
-        # Extract Stage 1 user message (contains K-line table; no need to rebuild)
-        stage1_user_content = ""
-        for msg in stage1_messages:
-            if msg.get("role") == "user":
-                stage1_user_content = msg["content"]
-                break
-
-        # Stage 2 user prompt: include_kline_table=False → "沿用上一轮" fallback
         stage2_user_content = self._build_stage2_user_prompt(
             frame=frame,
             stage1_json=stage1_json,
             strategy_files=strategy_files,
             experience_entries=experience_entries,
-            include_kline_table=False,
             decision_stance=decision_stance,
             previous_record=previous_record,
         )
 
         return [
-            {"role": "system",    "content": system_content},
-            {"role": "user",      "content": stage1_user_content},
-            {"role": "user",      "content": stage2_user_content},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": stage2_user_content},
         ]
 
     def _build_stage2_user_prompt(
@@ -1415,7 +1414,6 @@ class PromptAssembler:
         stage1_json: dict,
         strategy_files: list[str],
         experience_entries: list[Any],
-        include_kline_table: bool,
         decision_stance: str = "conservative",
         previous_record: Any | None = None,
     ) -> str:
@@ -1468,25 +1466,21 @@ class PromptAssembler:
         n_bars = len(frame.bars)
         breakout_tick_hint = format_breakout_tick_hint(frame)
         kline_block = (
-            f"## K线数据(与阶段一相同, 共{n_bars}根，含阳阴列；各节点 bar_range 由你据实填写)\n\n"
+            f"## K线数据(共{n_bars}根，含阳阴列；各节点 bar_range 由你据实填写)\n\n"
             f"{kline_table}\n\n"
             "## K线几何特征(程序预计算，仅作逐棒客观辅助；不得替代交易者方程；"
             "基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{feature_table}\n\n"
-            if include_kline_table
-            else (
-                f"## K线数据\n\n"
-                f"沿用上一轮阶段一用户消息中的同一份 K线数据，共 {n_bars} 根。"
-                f"各节点 bar_range 由你据实填写，必要时可回溯上方阶段一用户消息查看具体价格。\n\n"
-            )
         )
-        if breakout_tick_hint and include_kline_table:
+        if breakout_tick_hint:
             kline_block += f"{breakout_tick_hint}\n\n"
         prev_pred_block = self._render_previous_prediction(previous_record)
         return (
+            f"{_STAGE2_API_TASK_RULE}\n\n"
             "## 阶段二任务\n\n"
             "你现在独立执行阶段二：交易决策、风险收益和下单方式评估（基于阶段一诊断结果）。\n"
-            "以下 JSON 是程序校验通过后的阶段一诊断结果，请以此为权威依据；阶段一 K 线数据见上方阶段一用户消息。\n\n"
+            "以下 JSON 是程序校验通过后的阶段一诊断结果，请以此为权威依据；"
+            "本消息下方附有完整 K 线表与几何特征。\n\n"
             f"{stage2_context}\n\n"
             "---\n\n"
             f"## 阶段一诊断结果\n\n```json\n"

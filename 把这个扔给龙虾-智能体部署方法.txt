@@ -315,9 +315,9 @@ if errorlevel 1 (
 ================================================================
 
 程序启动后，在 GUI 界面中点击"设置"按钮：
-- 填入 Base URL（如 https://www.packyapi.com/v1）
-- 填入 API Key
-- 选择模型（如 claude-sonnet-4-6）
+- Base URL 默认已为 https://api.deepseek.com（DeepSeek 官方接口，一般无需修改）
+- 填入 DeepSeek API Key（在 https://platform.deepseek.com 申请）
+- 模型默认已为 deepseek-v4-flash（可按需改为 deepseek-v4-pro 等）
 - 点击保存
 
 API Key 会被 DPAPI 加密存储在 config/settings.json 中，不会明文保存。

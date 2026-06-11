@@ -176,3 +176,35 @@ def test_lenient_validator_maps_openclaw_enum_slips() -> None:
         kline_frame=_frame(),
     )
     assert isinstance(result, Ok), result
+
+
+def test_lenient_validator_maps_action_and_limit_order_pending() -> None:
+    from pa_agent.ai.stage2_normalizer import _normalize_stage2_enum_aliases
+
+    obj = _stage2_trade_obj(
+        order_type="限价单",
+        order_direction="bearish",
+        entry_price=4088.07,
+        take_profit_price=4083.02,
+        stop_loss_price=4091.44,
+        entry_basis_bar="K1",
+        entry_basis_extreme="high",
+        entry_rule="limit short",
+        estimated_win_rate=42,
+    )
+    obj["bar_analysis"]["always_in"] = "short"
+    obj["bar_analysis"]["entry_bar"] = {
+        "strength": "pending",
+        "follow_through": False,
+        "still_valid": True,
+        "freshness": "limit_order_pending",
+    }
+    obj["terminal"] = {
+        "node_id": "10.3",
+        "outcome": "action",
+        "label": "限价做空",
+    }
+    assert _normalize_stage2_enum_aliases(obj) is True
+    assert obj["decision"]["order_direction"] == "做空"
+    assert obj["terminal"]["outcome"] == "trade"
+    assert obj["bar_analysis"]["entry_bar"]["freshness"] == "pending"

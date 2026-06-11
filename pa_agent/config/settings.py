@@ -13,8 +13,8 @@ class AIProviderSettings(BaseModel):
     """AI provider connection and behaviour settings."""
     model_config = ConfigDict(extra="ignore")
 
-    model: str = "claude-sonnet-4-6"
-    base_url: str = "https://www.packyapi.com/v1"
+    model: str = "deepseek-v4-flash"
+    base_url: str = "https://api.deepseek.com"
     api_key: str = ""
     api_key_encrypted: str = ""
     thinking: bool = True

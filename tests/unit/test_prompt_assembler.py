@@ -300,8 +300,8 @@ def test_stage2_message_roles(assembler: PromptAssembler):
     assert messages[1]["role"] == "user"
 
 
-def test_stage2_continuation_omits_stage1_user_prompt(assembler: PromptAssembler):
-    """Stage 2 reuses Stage 1 user turn for K-line cache; S2 user omits full table."""
+def test_stage2_continuation_is_standalone_not_stage1_chat(assembler: PromptAssembler):
+    """Stage 2 must not prepend Stage 1 user turn (OpenClaw Agent chat-mode retries)."""
     frame = _make_frame()
     stage1_messages = assembler.build_stage1(frame)
     stage1_json = {"cycle_position": "spike", "direction": "bearish", "gate_result": "proceed"}
@@ -315,13 +315,14 @@ def test_stage2_continuation_omits_stage1_user_prompt(assembler: PromptAssembler
         experience_entries=[],
     )
 
-    # system, user(S1 with K-line table), user(S2 task without repeating table)
-    assert [m["role"] for m in messages] == ["system", "user", "user"]
-    assert "二元决策.txt" in messages[0]["content"] or "## 3." in messages[0]["content"]
-    assert "K线数据" in messages[1]["content"]
-    assert "序号 | 时间" in messages[1]["content"]
-    s2_user = messages[2]["content"]
-    assert "沿用上一轮阶段一用户消息中的同一份 K线数据" in s2_user
+    assert [m["role"] for m in messages] == ["system", "user"]
+    s2_user = messages[1]["content"]
+    assert "阶段二 API 任务模式" in s2_user
+    assert "阶段二任务" in s2_user
+    assert "你现在只执行阶段一" not in s2_user
+    assert "沿用上一轮阶段一用户消息" not in s2_user
+    assert "K线数据" in s2_user
+    assert "序号 | 时间" in s2_user
     assert "下跌通道分析识别" in s2_user
     assert "上涨通道分析识别" not in s2_user
     assert "【最后一步·必做】" in s2_user
@@ -625,7 +626,7 @@ def test_previous_prediction_rendered_in_incremental_mode(assembler: PromptAssem
         previous_record=previous,
     )
 
-    user = messages[2]["content"]  # Stage 2 user prompt
+    user = messages[1]["content"]  # Stage 2 user prompt
     assert "上一轮下一根K线预测" in user
     assert "阳线" in user
     assert "60%" in user
@@ -687,5 +688,5 @@ def test_unpredictable_previous_prediction_renders_note(assembler: PromptAssembl
         previous_record=previous,
     )
 
-    user = messages[2]["content"]  # Stage 2 user prompt
+    user = messages[1]["content"]  # Stage 2 user prompt
     assert "不可预测" in user

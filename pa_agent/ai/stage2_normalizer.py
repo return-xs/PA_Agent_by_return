@@ -53,6 +53,10 @@ _ENTRY_BAR_STRENGTH_ALIASES: dict[str, str] = {
 }
 
 _TERMINAL_OUTCOME_ALIASES: dict[str, str] = {
+    "action": "trade",
+    "execute": "trade",
+    "execution": "trade",
+    "place_order": "trade",
     "breakout_entry": "trade",
     "breakout": "trade",
     "limit_entry": "trade",
@@ -80,6 +84,11 @@ _ENTRY_BAR_FRESHNESS_ALIASES: dict[str, str] = {
     # "K0_trigger" / "k0_trigger" means "awaiting entry trigger at K0" — effectively pending
     "trigger": "pending",
     "k0_trigger": "pending",
+    "limit_order_pending": "pending",
+    "limit_pending": "pending",
+    "order_pending": "pending",
+    "awaiting_fill": "pending",
+    "awaiting_trigger": "pending",
 }
 
 
@@ -215,6 +224,17 @@ def _normalize_stage2_enum_aliases(out: dict[str, Any]) -> bool:
                 if mapped_strength and mapped_strength != raw_strength:
                     entry_bar["strength"] = mapped_strength
                     logger.debug("entry_bar.strength %r -> %r", raw_strength, mapped_strength)
+                    changed = True
+            raw_fresh = entry_bar.get("freshness")
+            if isinstance(raw_fresh, str):
+                mapped_fresh = _ENTRY_BAR_FRESHNESS_ALIASES.get(
+                    raw_fresh.strip().lower()
+                )
+                if mapped_fresh and mapped_fresh != raw_fresh:
+                    entry_bar["freshness"] = mapped_fresh
+                    logger.debug(
+                        "entry_bar.freshness %r -> %r", raw_fresh, mapped_fresh
+                    )
                     changed = True
 
     terminal = out.get("terminal")

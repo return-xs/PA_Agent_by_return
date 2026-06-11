@@ -1,7 +1,12 @@
 """Detect stage-2 order opportunities and format alert text."""
 from __future__ import annotations
 
+import logging
+import os
+import sys
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 ORDER_OPPORTUNITY_TYPES: frozenset[str] = frozenset({"限价单", "突破单", "市价单"})
 
@@ -46,20 +51,53 @@ def format_order_alert_message(decision: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def play_order_alert_sound() -> None:
-    """Play a short system alert (best-effort)."""
-    try:
-        import sys
+def _windows_alert_wav_paths() -> list[str]:
+    media = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Media")
+    names = (
+        "notify.wav",
+        "Windows Notify.wav",
+        "Alarm01.wav",
+        "Windows Exclamation.wav",
+    )
+    return [os.path.join(media, name) for name in names]
 
-        if sys.platform == "win32":
-            import winsound
 
+def play_order_alert_sound() -> bool:
+    """Play a short alert sound (best-effort). Returns True if playback was attempted."""
+    if sys.platform == "win32":
+        import winsound
+
+        for path in _windows_alert_wav_paths():
+            if not os.path.isfile(path):
+                continue
+            try:
+                # Blocking playback: MessageBeep often returns instantly with no audible output.
+                winsound.PlaySound(path, winsound.SND_FILENAME)
+                return True
+            except Exception as exc:
+                logger.debug("order alert PlaySound file %s failed: %s", path, exc)
+
+        for alias in ("SystemExclamation", "SystemHand", "SystemAsterisk"):
+            try:
+                winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_NODEFAULT)
+                return True
+            except Exception as exc:
+                logger.debug("order alert PlaySound alias %s failed: %s", alias, exc)
+
+        try:
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-        else:
-            from PyQt6.QtWidgets import QApplication
+            return True
+        except Exception as exc:
+            logger.debug("order alert MessageBeep failed: %s", exc)
 
-            app = QApplication.instance()
-            if app is not None:
-                app.beep()
-    except Exception:
-        pass
+    try:
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.beep()
+            return True
+    except Exception as exc:
+        logger.debug("order alert QApplication.beep failed: %s", exc)
+
+    return False

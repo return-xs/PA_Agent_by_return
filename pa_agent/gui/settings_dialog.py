@@ -192,7 +192,9 @@ class SettingsDialog(QDialog):
         self._alert_on_order_check.setToolTip(
             "当阶段二给出限价单、突破单或市价单时：播放系统提示音、弹出摘要对话框，"
             "并切换到右侧「决策」标签页；不再自动进入「决策树可视化」播放演示。"
+            "勾选时会播放一次试听。"
         )
+        self._alert_on_order_check.stateChanged.connect(self._on_alert_on_order_changed)
         general_form.addRow("下单提醒:", self._alert_on_order_check)
 
         self._flow_auto_play_check = QCheckBox("决策树可视化生成后自动播放路径")
@@ -272,9 +274,11 @@ class SettingsDialog(QDialog):
             self._decision_stance_combo.setCurrentIndex(stance_idx)
         self._last_symbol_edit.setText(g.last_symbol)
         self._last_timeframe_edit.setText(g.last_timeframe)
+        self._alert_on_order_check.blockSignals(True)
         self._alert_on_order_check.setChecked(
             bool(getattr(g, "alert_on_order_opportunity", True))
         )
+        self._alert_on_order_check.blockSignals(False)
         self._flow_auto_play_check.setChecked(
             getattr(g, "decision_flow_auto_play", False)
         )
@@ -364,6 +368,13 @@ class SettingsDialog(QDialog):
     def set_decision_flow_play_handler(self, handler: Callable[[], None] | None) -> None:
         """Register callback invoked when user clicks 播放决策树可视化."""
         self._decision_flow_play_handler = handler
+
+    def _on_alert_on_order_changed(self, _state: int) -> None:
+        if not self._alert_on_order_check.isChecked():
+            return
+        from pa_agent.gui.order_opportunity import play_order_alert_sound
+
+        play_order_alert_sound()
 
     def _on_play_decision_flow_now(self) -> None:
         # Allow previewing playback without pressing “保存”:
