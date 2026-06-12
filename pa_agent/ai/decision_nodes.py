@@ -1862,6 +1862,16 @@ def route_order_method(
         and _has_trade_prices()
     ):
         candidate = "市价单"
+    elif (
+        model_order_type == "突破单"
+        and _trace_answer(decision_trace, "10.3") == "是"
+        and _has_trade_prices()
+        and decision.get("entry_basis_bar")
+        and decision.get("entry_basis_extreme")
+    ):
+        # broad_channel defaults to 限价单, but a pending breakdown/breakout
+        # at basis±tick is not a sell-limit-above-market plan — preserve 突破单.
+        candidate = "突破单"
 
     if candidate == "不下单":
 
