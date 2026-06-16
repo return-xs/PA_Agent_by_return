@@ -306,8 +306,8 @@ class MainWindow(QMainWindow):
         _ai_model_action.triggered.connect(self._open_ai_model_settings_dialog)
         menu_bar.addAction(_ai_model_action)
 
-        # 2. 飞书设置 — 点击直接弹对话框（无下拉）
-        _feishu_action = QAction("飞书设置", self)
+        # 2. 飞书发送通知设置 — 点击直接弹对话框（无下拉）
+        _feishu_action = QAction("飞书发送通知设置", self)
         _feishu_action.triggered.connect(self._open_feishu_settings_dialog)
         menu_bar.addAction(_feishu_action)
 
