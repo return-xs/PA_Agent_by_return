@@ -101,6 +101,9 @@ def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
     from pa_agent.data.ashare_common import normalize_ashare_symbol
 
     sym = (symbol or "").strip()
+    if kind == "csv":
+        # CSV symbols are filenames — no gold/forex normalization.
+        return sym
     if kind in ("akshare", "eastmoney", "tushare"):
         code = normalize_ashare_symbol(sym)
         if not code or not _looks_like_ashare_code(code):

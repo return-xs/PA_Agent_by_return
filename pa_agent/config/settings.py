@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "tushare"]
+DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "tushare", "yfinance", "csv"]
 NormalizationMode = Literal["strict", "lenient"]
 
 
@@ -69,6 +69,12 @@ class GeneralSettings(BaseModel):
     last_tradingview_exchange: str = ""
     last_symbol: str = "XAUUSDm"
     last_timeframe: str = "15m"
+    #: CSV 数据源：单个 CSV 文件路径（单文件模式）
+    csv_file_path: str = ""
+    #: CSV 数据源：包含 .csv 文件的目录路径（目录模式，优先级高于单文件）
+    csv_directory: str = ""
+    #: CSV 数据源：手动指定的 timeframe（空字符串 = 自动推断）
+    csv_timeframe: str = ""
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50
     #: 阶段二给出限价/突破/市价单时：警报音、弹窗，并自动切到「决策」页（跳过决策树可视化演示）

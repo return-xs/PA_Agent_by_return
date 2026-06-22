@@ -370,12 +370,22 @@ class MainWindow(QMainWindow):
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
             "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、"
-            "本地仅支持 MT5 与 TradingView"
+            "CSV 文件（本地离线数据）"
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
         )
         ctrl_layout.addWidget(self._data_source_combo)
+
+        # CSV file/directory picker — only visible when data source is CSV
+        self._csv_picker_btn = QPushButton("📂")
+        self._csv_picker_btn.setFixedWidth(32)
+        self._csv_picker_btn.setToolTip(
+            "选择 CSV 文件或包含 .csv 文件的目录"
+        )
+        self._csv_picker_btn.clicked.connect(self._on_csv_picker_clicked)
+        self._csv_picker_btn.hide()
+        ctrl_layout.addWidget(self._csv_picker_btn)
 
         # TradingView exchange is forced to «auto» whenever the data source is TV.
         # We still keep the field visible for clarity, but it is not user-editable.
@@ -895,9 +905,13 @@ class MainWindow(QMainWindow):
         return text.upper()
 
     def _sync_tv_exchange_visibility(self) -> None:
-        """Show exchange field only for TradingView, allow manual selection."""
-        visible = (
+        """Show exchange field only for TradingView; CSV picker only for CSV."""
+        is_tv = (
             self._current_data_source_kind() == "tradingview"
+            and not getattr(self, "_demo_mode", False)
+        )
+        is_csv = (
+            self._current_data_source_kind() == "csv"
             and not getattr(self, "_demo_mode", False)
         )
         for w in (
@@ -905,8 +919,68 @@ class MainWindow(QMainWindow):
             getattr(self, "_tv_exchange_combo", None),
         ):
             if w is not None:
-                w.setVisible(visible)
-                w.setEnabled(visible)
+                w.setVisible(is_tv)
+                w.setEnabled(is_tv)
+        csv_btn = getattr(self, "_csv_picker_btn", None)
+        if csv_btn is not None:
+            csv_btn.setVisible(is_csv)
+
+    def _on_csv_picker_clicked(self) -> None:
+        """Open a file/directory dialog to select CSV source path."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from pa_agent.config.settings import save_settings
+        from pa_agent.config.paths import SETTINGS_JSON_PATH
+
+        # Ask user: directory or single file?
+        choice = QMessageBox.question(
+            self,
+            "选择 CSV 数据源",
+            "请选择 CSV 数据源模式：\n\n"
+            "「是」— 选择目录（目录中每个 .csv 文件为一个品种）\n"
+            "「否」— 选择单个 CSV 文件",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return
+
+        settings = getattr(self._ctx, "settings", None)
+        if choice == QMessageBox.StandardButton.Yes:
+            # Directory mode
+            directory = QFileDialog.getExistingDirectory(
+                self, "选择包含 .csv 文件的目录"
+            )
+            if not directory:
+                return
+            if settings is not None:
+                settings.general.csv_directory = directory
+                settings.general.csv_file_path = ""
+                try:
+                    save_settings(settings, SETTINGS_JSON_PATH)
+                except Exception as exc:
+                    logger.debug("Failed to persist CSV directory: %s", exc)
+            logger.info("CSV directory selected: %s", directory)
+        else:
+            # Single-file mode
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择 CSV 文件",
+                "",
+                "CSV 文件 (*.csv);;所有文件 (*)",
+            )
+            if not file_path:
+                return
+            if settings is not None:
+                settings.general.csv_file_path = file_path
+                settings.general.csv_directory = ""
+                try:
+                    save_settings(settings, SETTINGS_JSON_PATH)
+                except Exception as exc:
+                    logger.debug("Failed to persist CSV file path: %s", exc)
+            logger.info("CSV file selected: %s", file_path)
+
+        # Trigger a full data-source switch to reload with the new path.
+        self._switch_data_source("csv")
 
     def _force_tv_exchange_auto(self) -> None:
         """Force TradingView exchange UI to «auto» (empty string)."""
@@ -1018,6 +1092,8 @@ class MainWindow(QMainWindow):
             )
         elif kind in ("akshare", "eastmoney", "tushare"):
             line.setPlaceholderText("A股 6 位代码，如 600519；指数 000300 或 sh000300")
+        elif kind == "csv":
+            line.setPlaceholderText("选择 CSV 文件或点击 📂 选择目录")
         else:
             line.setPlaceholderText("输入 MT5 品种名，如 XAUUSDm…")
 
@@ -1106,6 +1182,22 @@ class MainWindow(QMainWindow):
         prev_index = self._data_source_combo.findData(self._current_data_source_kind())
         if kind == "tradingview" and not self._ensure_tradingview_reachable():
             return
+        # CSV: if no path configured yet, show the file picker first
+        if kind == "csv":
+            _settings = getattr(self._ctx, "settings", None)
+            _csv_dir = ""
+            _csv_file = ""
+            if _settings is not None:
+                _csv_dir = getattr(_settings.general, 'csv_directory', '') or ''
+                _csv_file = getattr(_settings.general, 'csv_file_path', '') or ''
+            if not _csv_dir and not _csv_file:
+                # Revert combo, then trigger picker.  The picker will call
+                # _switch_data_source("csv") after the path is saved.
+                self._data_source_combo.blockSignals(True)
+                self._data_source_combo.setCurrentIndex(prev_index if prev_index >= 0 else 0)
+                self._data_source_combo.blockSignals(False)
+                self._on_csv_picker_clicked()
+                return
         try:
             self._switch_data_source(kind)
         except Exception as exc:  # noqa: BLE001
@@ -1163,10 +1255,46 @@ class MainWindow(QMainWindow):
             timeframe = self._tf_combo.currentText()
 
             new_source = create_data_source(kind)
+            # CSV: auto-select the correct symbol from available CSV files.
+            # The symbol from the previous data source (e.g. "XAUUSDm") never
+            # matches a CSV file stem, so we always resolve to the right one.
+            if kind == "csv":
+                from pa_agent.data.csv_source import CsvSource
+                if isinstance(new_source, CsvSource):
+                    # Need to set path before list_symbols() works
+                    _s = getattr(self._ctx, "settings", None)
+                    if _s is not None:
+                        _csv_dir = getattr(_s.general, 'csv_directory', '') or ''
+                        _csv_file = getattr(_s.general, 'csv_file_path', '') or ''
+                        new_source.set_path(directory=_csv_dir, file_path=_csv_file)
+                    csv_symbols = new_source.list_symbols()
+                    if csv_symbols:
+                        # Use the current symbol if it happens to match a CSV
+                        # file; otherwise pick the first available.
+                        if symbol not in csv_symbols:
+                            symbol = csv_symbols[0]
+                            self._symbol_combo.blockSignals(True)
+                            self._symbol_combo.setCurrentText(symbol)
+                            self._symbol_combo.blockSignals(False)
             # Wire auto-probe status callback for TV
             from pa_agent.data.tradingview import TradingViewSource
             if isinstance(new_source, TradingViewSource):
                 new_source.on_probe_status = self._on_tv_probe_status
+            # CSV: set path from settings before connect
+            if kind == "csv":
+                from pa_agent.data.csv_source import CsvSource
+                if isinstance(new_source, CsvSource):
+                    _s = getattr(self._ctx, "settings", None)
+                    _csv_dir = ""
+                    _csv_file = ""
+                    _csv_tf = ""
+                    if _s is not None:
+                        _csv_dir = getattr(_s.general, 'csv_directory', '') or ''
+                        _csv_file = getattr(_s.general, 'csv_file_path', '') or ''
+                        _csv_tf = getattr(_s.general, 'csv_timeframe', '') or ''
+                    new_source.set_path(directory=_csv_dir, file_path=_csv_file)
+                    if _csv_tf:
+                        new_source._tf_override = _csv_tf
             new_source.connect()
             self._apply_tv_exchange_to_source(new_source)
             new_source.subscribe(symbol, timeframe)
@@ -1175,6 +1303,22 @@ class MainWindow(QMainWindow):
 
             self._populate_symbol_combo_for_source()
             self._populate_timeframe_combo_for_source()
+
+            # CSV: update timeframe combo with auto-inferred value AFTER populate
+            # (populate may reset to preferred list; we override with the actual TF).
+            if kind == "csv":
+                inferred_tf = getattr(new_source, "_timeframe", "") or timeframe
+                if inferred_tf:
+                    idx_tf = self._tf_combo.findText(inferred_tf)
+                    if idx_tf >= 0:
+                        self._tf_combo.blockSignals(True)
+                        self._tf_combo.setCurrentIndex(idx_tf)
+                        self._tf_combo.blockSignals(False)
+                    else:
+                        self._tf_combo.blockSignals(True)
+                        self._tf_combo.addItem(inferred_tf)
+                        self._tf_combo.setCurrentText(inferred_tf)
+                        self._tf_combo.blockSignals(False)
             if kind == "tradingview":
                 self._persist_tradingview_exchange()
 

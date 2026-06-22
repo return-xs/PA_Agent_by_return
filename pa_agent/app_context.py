@@ -83,6 +83,31 @@ class AppContext:
                     # Use saved exchange setting, default to auto (empty).
                     saved_exchange = getattr(settings.general, 'last_tradingview_exchange', '') or ''
                     data_source.set_exchange(saved_exchange)
+            if ds_kind == "csv":
+                from pa_agent.data.csv_source import CsvSource
+
+                if isinstance(data_source, CsvSource):
+                    csv_dir = getattr(settings.general, 'csv_directory', '') or ''
+                    csv_file = getattr(settings.general, 'csv_file_path', '') or ''
+                    csv_tf = getattr(settings.general, 'csv_timeframe', '') or ''
+                    if csv_dir or csv_file:
+                        data_source.set_path(directory=csv_dir, file_path=csv_file)
+                        if csv_tf:
+                            data_source._tf_override = csv_tf
+                            logger.info("CSV timeframe override: %s", csv_tf)
+                    # Resolve the correct symbol from available CSV files.
+                    # last_symbol may be a leftover from a previous data source
+                    # (e.g. "XAUUSDm") that doesn't match any CSV file stem.
+                    csv_symbols = data_source.list_symbols()
+                    if csv_symbols:
+                        last_sym = settings.general.last_symbol
+                        if last_sym not in csv_symbols:
+                            settings.general.last_symbol = csv_symbols[0]
+                            logger.info(
+                                "CSV symbol resolved: %r → %r",
+                                last_sym,
+                                csv_symbols[0],
+                            )
             data_source.subscribe(
                 settings.general.last_symbol,
                 settings.general.last_timeframe,

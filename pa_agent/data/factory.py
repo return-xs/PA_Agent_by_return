@@ -17,12 +17,14 @@ DataSourceKind = Literal[
     "eastmoney",
     "tushare",
     "yfinance",
+    "csv",
 ]
 
 # UI-visible sources only — ``eastmoney`` is config/programmatic, not listed here.
 DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
+    ("csv", "CSV 文件"),
 )
 
 _HIDDEN_KINDS: frozenset[DataSourceKind] = frozenset(
@@ -36,6 +38,7 @@ _DEFAULT_SYMBOLS: dict[DataSourceKind, str] = {
     "eastmoney": A_SHARE_DEFAULT_SYMBOL,
     "tushare": A_SHARE_DEFAULT_SYMBOL,
     "yfinance": "GC=F",
+    "csv": "",
 }
 
 
@@ -66,6 +69,8 @@ def data_source_label(kind: str | None) -> str:
         return "AkShare"
     if normalized == "yfinance":
         return "YFinance"
+    if normalized == "csv":
+        return "CSV 文件"
     return "MT5"
 
 
@@ -98,6 +103,10 @@ def create_data_source(kind: str | None) -> DataSource:
         from pa_agent.data.yfinance_source import YFinanceSource
 
         return YFinanceSource()
+    if normalized == "csv":
+        from pa_agent.data.csv_source import CsvSource
+
+        return CsvSource()
     from pa_agent.data.mt5 import MT5Source
 
     return MT5Source()
