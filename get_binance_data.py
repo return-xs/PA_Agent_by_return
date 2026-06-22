@@ -5,7 +5,6 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import Exchang
 
 import os
 import pandas as pd
-import json
 import logging
 logging.basicConfig(level=logging.INFO)
 from dotenv import load_dotenv
@@ -33,7 +32,7 @@ if __name__ == "__main__":
     end_date = None
 
     # 获取历史数据
-    interval = '5m'
+    interval = '30m'
     response = client.rest_api.kline_candlestick_data(symbol, interval, start_date, end_date)
 
     data: ExchangeInformationResponse = response.data()

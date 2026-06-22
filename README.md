@@ -34,6 +34,25 @@
 
 ---
 
+## 获取 CSV 数据
+
+```shell
+pip install binance-sdk-derivatives-trading-usds-futures
+touch .env
+```
+
+在 `.env` 文件中填写 API_KEY 和 API_SECRET:
+
+```shell
+API_KEY=""
+API_SECRET=""
+```
+
+然后运行 `get_binance_data.py`。
+
+> 在 get_binance_data.py 中可以修改货币种类、周期、时间段
+
+
 ## 快速开始
 
 直接在系统中安装（推荐部署在本机）：
