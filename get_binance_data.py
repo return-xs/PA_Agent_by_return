@@ -3,6 +3,7 @@ from binance_common.constants import DERIVATIVES_TRADING_USDS_FUTURES_REST_API_P
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import DerivativesTradingUsdsFutures
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import ExchangeInformationResponse
 
+from datetime import datetime
 import os
 import pandas as pd
 import logging
@@ -29,10 +30,10 @@ if __name__ == "__main__":
     # start_date = '2026-01-01'
     # end_date = '2025-09-30'
     start_date = None
-    end_date = None
+    end_date = int(datetime.strptime('2026-06-22 18:30:00', '%Y-%m-%d %H:%M:%S').timestamp()) * 1000
 
     # 获取历史数据
-    interval = '30m'
+    interval = '5m'
     response = client.rest_api.kline_candlestick_data(symbol, interval, start_date, end_date)
 
     data: ExchangeInformationResponse = response.data()
