@@ -18,7 +18,7 @@ class AIProviderSettings(BaseModel):
     api_key: str = ""
     api_key_encrypted: str = ""
     thinking: bool = True
-    reasoning_effort: Literal["low", "medium", "high", "max"] = "max"
+    reasoning_effort: Literal["low", "medium", "high", "max"] = "high"
     context_window: int = 2_000_000
 
 
@@ -28,7 +28,7 @@ class PromptSettings(BaseModel):
 
     #: When True, Stage 2 loads every strategy .txt (legacy/test behaviour).
     stage2_load_full_strategy_library: bool = False
-    experience_max_entries: int = Field(default=3, ge=0, le=10)
+    experience_max_entries: int = Field(default=0, ge=0, le=10)
     experience_max_chars_per_entry: int = Field(default=400, ge=100, le=4000)
     #: Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags).
     stage1_inject_pattern_briefs: bool = True
@@ -85,7 +85,7 @@ class GeneralSettings(BaseModel):
     #: 阶段二交易倾向：balanced=默认；conservative/aggressive 逐级调整下单意愿
     decision_stance: DecisionStance = "balanced"
     #: 决策树可视化：在「整图适配」基础上的缩放百分比（100=与适配一致；可任意放大，仅下限 10%）
-    decision_flow_default_zoom_pct: int = Field(default=500, ge=10)
+    decision_flow_default_zoom_pct: int = Field(default=600, ge=10)
     #: 「实时」页思考过程/撰写回答框与追问输入框的等宽字体字号（pt）
     stream_pane_font_pt: int = Field(default=11, ge=8, le=28)
     #: K 线图上 #序号 标签的字号（pt）
@@ -100,6 +100,8 @@ class GeneralSettings(BaseModel):
     decision_confidence_threshold: int = Field(default=40, ge=0, le=100)
     #: 开启下根K线预期功能；关闭时不向模型请求该预测，节省 token
     enable_next_bar_prediction: bool = False
+    #: 同一结构位 entry 相差≤3跳时，禁止反向新方案的冷却 K 线根数（已收盘）
+    structure_flip_cooldown_bars: int = Field(default=3, ge=1, le=50)
 
     @field_validator("last_data_source", mode="before")
     @classmethod
@@ -156,7 +158,7 @@ class PushPlusSettings(BaseModel):
     """PushPlus notification settings (settings.json only; no GUI)."""
     model_config = ConfigDict(extra="ignore")
 
-    enabled: bool = True
+    enabled: bool = False
     token: str = ""
 
 
@@ -183,6 +185,7 @@ def provider_api_key_configured(settings: Settings | None) -> bool:
 # ── Persistence ───────────────────────────────────────────────────────────────
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -259,7 +262,16 @@ def load_settings(path: Path | None = None) -> "Settings":
 
     migrated_feishu = _migrate_legacy_feishu_json(raw, path)
     settings = Settings.model_validate(raw)
-    if migrated_feishu:
+    dirty = migrated_feishu
+    if settings.pushplus.enabled and not settings.pushplus.token.strip():
+        if not (os.environ.get("PUSHPLUS_TOKEN") or "").strip():
+            settings.pushplus.enabled = False
+            logger.info(
+                "PushPlus enabled but token empty — auto-disabled "
+                "(Feishu notifications unaffected)"
+            )
+            dirty = True
+    if dirty:
         save_settings(settings, path)
     return settings
 

@@ -89,7 +89,7 @@ def test_apply_qclaw_provider_keeps_openclaw_sub_agent_alias() -> None:
     ):
         with patch("pa_agent.ai.qclaw_connector.detect_qclaw", return_value=True):
             with patch(
-                "pa_agent.ai.qclaw_connector.qclaw_health_check",
+                "pa_agent.ai.qclaw_connector.qclaw_health_check_base",
                 return_value=(True, "ok"),
             ):
                 err = apply_qclaw_provider_to_settings(
@@ -124,7 +124,10 @@ def test_apply_qclaw_provider_forces_agent_model() -> None:
         )(),
     ):
         with patch("pa_agent.ai.qclaw_connector.detect_qclaw", return_value=True):
-            with patch("pa_agent.ai.qclaw_connector.qclaw_health_check", return_value=(True, "ok")):
+            with patch(
+                "pa_agent.ai.qclaw_connector.qclaw_health_check_base",
+                return_value=(True, "ok"),
+            ):
                 err = apply_qclaw_provider_to_settings(settings)
 
     assert err is None
@@ -157,7 +160,7 @@ def test_apply_qclaw_provider_on_load_keeps_sub_agent_alias() -> None:
         )()
         with patch("pa_agent.ai.qclaw_connector.detect_qclaw", return_value=True):
             with patch(
-                "pa_agent.ai.qclaw_connector.qclaw_health_check",
+                "pa_agent.ai.qclaw_connector.qclaw_health_check_base",
                 return_value=(True, "ok"),
             ):
                 err = apply_qclaw_provider_to_settings(settings)

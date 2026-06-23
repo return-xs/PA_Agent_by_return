@@ -73,6 +73,21 @@ def _parse_sr_price(raw: object) -> float | None:
     return None
 
 
+def _best_probability_key(probs: dict) -> str | None:
+    """Return the key with highest numeric probability; tolerate bad values."""
+    best_key: str | None = None
+    best_val = -1
+    for key, raw in probs.items():
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if val > best_val:
+            best_val = val
+            best_key = str(key)
+    return best_key
+
+
 # ── AI Worker ─────────────────────────────────────────────────────────────────
 
 class _AnalysisWorker(QThread):
@@ -208,6 +223,8 @@ class MainWindow(QMainWindow):
         self._ctx = ctx
         self._worker: _AnalysisWorker | None = None
         self._analysis_worker_id: object | None = None
+        self._prep_worker: Any = None
+        self._prep_worker_id: object | None = None
         self._cancel_token: Any = None
         self._window_closing = False
         self._analysis_in_progress = False
@@ -809,8 +826,25 @@ class MainWindow(QMainWindow):
         else:
             self._zombie_workers = []
 
-    def _cancel_analysis_worker(self) -> None:
+    def _cancel_analysis_prep_worker(self) -> None:
+        """Drop any in-flight analysis prep worker (does not block the UI thread)."""
+        self._prep_worker_id = None
+        worker = getattr(self, "_prep_worker", None)
+        self._prep_worker = None
+        if worker is None:
+            return
+        try:
+            worker.ready.disconnect()
+            worker.failed.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        if worker.isRunning():
+            worker.wait(0)
+        worker.deleteLater()
+
+    def _cancel_analysis_worker(self, *, join_ms: int = 0) -> None:
         """Cancel the AI worker and invalidate any pending finished callbacks."""
+        self._cancel_analysis_prep_worker()
         self._analysis_worker_id = None
         if self._cancel_token is not None:
             self._cancel_token.set()
@@ -821,7 +855,7 @@ class MainWindow(QMainWindow):
         # Disconnect before join so stale slots cannot touch the UI mid-switch.
         self._disconnect_analysis_worker(worker)
         if worker.isRunning():
-            worker.wait(_WORKER_JOIN_TIMEOUT_MS)
+            worker.wait(join_ms)
         if worker.isRunning():
             logger.info(
                 "Analysis worker still running after %d ms cancel wait; "
@@ -1851,8 +1885,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             logger.debug("Frame build skipped: %s", exc)
 
-        # Update submit button label after each successful data tick.
-        self._refresh_incremental_label()
+        # Update submit button label after each successful data tick (throttled).
+        import time as _time
+
+        now = _time.monotonic()
+        last = getattr(self, "_incremental_label_refresh_ts", 0.0)
+        if now - last >= 2.0:
+            self._incremental_label_refresh_ts = now
+            self._refresh_incremental_label()
 
         # 保持分析：检测是否有新K线收盘，若有则自动触发分析
         self._check_keep_analysis(bars)
@@ -1911,7 +1951,7 @@ class MainWindow(QMainWindow):
         try:
             # ── Step 1: Cancel current AI worker ─────────────────────────────
             had_analysis = self._analysis_in_progress
-            self._cancel_analysis_worker()
+            self._cancel_analysis_worker(join_ms=_WORKER_JOIN_TIMEOUT_MS)
 
             # ── Step 2: Save partial record if analysis was in progress ───────
             if had_analysis:
@@ -2935,48 +2975,114 @@ class MainWindow(QMainWindow):
         *,
         force_incremental: bool = False,
     ) -> None:
-        """Continue analysis once K-line bars are available (caller thread = UI)."""
+        """Prepare analysis off the UI thread, then launch the AI worker."""
         self._sync_buffer_from_snapshot_bars(snapshot_bars)
-        frame = self._take_snapshot(
-            symbol, timeframe, bar_count, bars_raw=snapshot_bars
+
+        settings = getattr(self._ctx, "settings", None)
+        threshold = int(
+            getattr(getattr(settings, "general", None), "incremental_max_new_bars", 10)
         )
+
+        self._analysis_in_progress = True
+        self._last_analysis_had_error = False
+        self._update_submit_button_state()
+        self._status_bar.showMessage("准备分析…（构建快照）")
+        self._decision_badge.setText("准备中…")
+
+        from pa_agent.gui.analysis_prep_worker import AnalysisPrepWorker
+
+        self._cancel_analysis_prep_worker()
+        prep_id = object()
+        self._prep_worker_id = prep_id
+        prep = AnalysisPrepWorker(
+            bars_raw=list(snapshot_bars),
+            symbol=symbol,
+            timeframe=timeframe,
+            bar_count=bar_count,
+            now_ms=self._reference_now_ms(),
+            force_incremental=force_incremental,
+            incremental_threshold=threshold,
+            parent=None,
+        )
+        self._prep_worker = prep
+
+        def _on_ready(result: Any) -> None:
+            if getattr(self, "_prep_worker_id", None) is not prep_id:
+                return
+            if not _qobject_alive(self):
+                return
+            self._prep_worker = None
+            self._launch_analysis_worker(
+                symbol=symbol,
+                timeframe=timeframe,
+                bar_count=bar_count,
+                snapshot_bars=snapshot_bars,
+                prep=result,
+                force_incremental=force_incremental,
+            )
+
+        def _on_failed(msg: str) -> None:
+            if getattr(self, "_prep_worker_id", None) is not prep_id:
+                return
+            if not _qobject_alive(self):
+                return
+            self._prep_worker = None
+            self._analysis_in_progress = False
+            self._update_submit_button_state()
+            self._status_bar.showMessage(msg or "准备分析失败")
+            self._decision_badge.setText("")
+
+        prep.ready.connect(_on_ready)
+        prep.failed.connect(_on_failed)
+        prep.start()
+
+    def _launch_analysis_worker(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        bar_count: int,
+        snapshot_bars: Any,
+        prep: Any,
+        force_incremental: bool = False,
+    ) -> None:
+        """UI-thread launch after background prep (frame + incremental lookup)."""
+        frame = getattr(prep, "frame", None)
         if frame is None:
+            self._analysis_in_progress = False
+            self._update_submit_button_state()
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
             return
 
-        # Store frame so _on_analysis_finished can access it for trade logging
         self._last_analysis_frame = frame
+        previous_record = getattr(prep, "previous_record", None)
+        incremental_new_bar_count = getattr(prep, "incremental_new_bar_count", None)
+        incremental_detail = getattr(prep, "incremental_detail", None)
 
-        orchestrator = self._build_orchestrator()
-        if orchestrator is None:
-            self._status_bar.showMessage("编排器未就绪，请检查设置")
-            return
-
-        previous_record, incremental_new_bar_count, incremental_detail = (
-            self._find_incremental_base_record(
-                frame,
-                symbol,
-                timeframe,
-                force_incremental=force_incremental,
-            )
-        )
         if force_incremental and previous_record is None:
             reason = self._incremental_unavailable_reason(frame, symbol, timeframe)
+            self._analysis_in_progress = False
+            self._update_submit_button_state()
             self._status_bar.showMessage(reason)
             QMessageBox.warning(self, "无法增量分析", reason)
             return
 
-        # Record the most-recently-closed bar ts at submit time so that
-        # _refresh_keep_analysis_sentinel can restore the sentinel to this
-        # value after analysis completes.  This ensures any bars that close
-        # *during* the analysis run are detected by _check_keep_analysis on
-        # the very next RefreshLoop tick.
+        orchestrator = self._build_orchestrator()
+        if orchestrator is None:
+            self._analysis_in_progress = False
+            self._update_submit_button_state()
+            self._status_bar.showMessage("编排器未就绪，请检查设置")
+            return
+
         try:
             from pa_agent.data.bar_close_wait import current_forming_ts as _cft
+
             _bars_snap = list(snapshot_bars) if snapshot_bars else []
             _forming = _cft(
-                _bars_snap, timeframe,
-                symbol=symbol, now_ms=self._reference_now_ms(),
+                _bars_snap,
+                timeframe,
+                symbol=symbol,
+                now_ms=self._reference_now_ms(),
             )
             _submit_closed_ts: int | None = None
             if _forming is not None:
@@ -2995,14 +3101,12 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             self._keep_analysis_submit_closed_ts = None
 
-        # Create cancel token
         from pa_agent.util.threading import CancelToken
 
         self._cancel_token = CancelToken()
         worker_id = object()
         self._analysis_worker_id = worker_id
 
-        # Start worker in its own QThread (worker IS a QThread subclass)
         self._worker = _AnalysisWorker(
             orchestrator=orchestrator,
             frame=frame,
@@ -3016,8 +3120,13 @@ class MainWindow(QMainWindow):
                 return
             if not _qobject_alive(self):
                 return
-            self._on_analysis_finished(decision)
-            self._on_worker_done()
+            try:
+                self._on_analysis_finished(decision)
+            except Exception as exc:  # noqa: BLE001
+                self._last_analysis_had_error = True
+                logger.exception("Analysis finished UI update failed: %s", exc)
+            finally:
+                self._on_worker_done()
 
         self._worker.record_ready.connect(self._on_record_ready)
         self._worker.finished.connect(_on_worker_finished)
@@ -3031,13 +3140,15 @@ class MainWindow(QMainWindow):
             self._worker.reasoning_token.connect(panel.on_reasoning_token)
             self._worker.content_token.connect(panel.on_content_token)
 
-        # Freeze on closed-only frame; immediate redraw so chart matches the AI table.
+        self._worker.stage2_files_ready.connect(
+            self._on_stage2_files_ready,
+            Qt.ConnectionType.UniqueConnection,
+        )
+        # Start AI worker before heavy chart/UI work so the UI stays responsive.
+        self._worker.start()
+
         self._chart_widget.set_frame_now(frame, fit_view=True)
-
         self._set_chart_refresh_paused(True)
-
-        self._analysis_in_progress = True
-        self._last_analysis_had_error = False
         self._update_submit_button_state()
 
         # Reset FlowBar and SummaryStrip at the start of every analysis
@@ -3097,12 +3208,6 @@ class MainWindow(QMainWindow):
             pf.clear()
             pf.set_stage1_files(stage1_prompt_txt_files())
             pf.set_extras(stage1_builtin=True)
-
-        self._worker.stage2_files_ready.connect(
-            self._on_stage2_files_ready,
-            Qt.ConnectionType.UniqueConnection,
-        )
-        self._worker.start()
 
     def _find_incremental_base_record(
         self,
@@ -3252,64 +3357,7 @@ class MainWindow(QMainWindow):
             order = inner.get("order_type", "—")
             self._decision_badge.setText(f"决策: {order}")
             if self._maybe_alert_order_opportunity(inner):
-                # ── Trade record: log to CSV + chart image ────────────────────
-                _meta_symbol = ""
-                _meta_timeframe = ""
-                try:
-                    from pa_agent.records.trade_logger import save_trade_record
-                    settings = getattr(self._ctx, "settings", None)
-                    model_name = ""
-                    if settings is not None:
-                        model_name = getattr(settings.provider, "model", "") or ""
-                    _meta_symbol = getattr(self._ctx.settings.general, "last_symbol", "") if settings else ""
-                    _meta_timeframe = getattr(self._ctx.settings.general, "last_timeframe", "") if settings else ""
-                    save_trade_record(
-                        decision_inner=inner,
-                        stage2_full=decision,
-                        stage1_diagnosis=self._current_stage1_diagnosis() or None,
-                        frame=getattr(self, "_last_analysis_frame", None),
-                        meta_symbol=_meta_symbol,
-                        meta_timeframe=_meta_timeframe,
-                        decision_stance=getattr(getattr(settings, "general", None), "decision_stance", "") if settings else "",
-                        model_name=model_name,
-                    )
-                except Exception as _exc:  # noqa: BLE001
-                    logger.warning("Trade record logging failed: %s", _exc)
-
-                # ── 下单信号推送（飞书 + PushPlus，互不影响）──────────────────
-                try:
-                    from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu_order
-                    from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus_order
-                    from pa_agent.records.trade_logger import _TRADE_RECORDS_DIR
-
-                    # 找本次交易记录生成的最新 PNG（按修改时间倒序取第一个）
-                    _safe_sym = _meta_symbol.replace("/", "-").replace("\\", "-")
-                    _safe_tf = _meta_timeframe.replace("/", "-")
-                    _img_glob = f"{_safe_sym}_{_safe_tf}_*.png"
-                    _candidates = sorted(
-                        _TRADE_RECORDS_DIR.glob(_img_glob),
-                        key=lambda _p: _p.stat().st_mtime,
-                        reverse=True,
-                    )
-                    _latest_img = _candidates[0] if _candidates else None
-
-                    send_feishu_order(
-                        decision_inner=inner,
-                        stage2_full=decision,
-                        symbol=_meta_symbol,
-                        timeframe=_meta_timeframe,
-                        chart_image_path=_latest_img,
-                        settings=settings,
-                    )
-                    send_pushplus_order(
-                        decision_inner=inner,
-                        stage2_full=decision,
-                        symbol=_meta_symbol,
-                        timeframe=_meta_timeframe,
-                        settings=settings,
-                    )
-                except Exception as _notify_exc:  # noqa: BLE001
-                    logger.warning("下单信号通知失败（不影响主流程）: %s", _notify_exc)
+                self._spawn_post_order_followup(inner, decision)
 
             elif getattr(self, "_demo_mode", False):
                 self._present_decision_flow_playback(force_play=True)
@@ -3341,8 +3389,9 @@ class MainWindow(QMainWindow):
                 ncp = decision.get("next_cycle_prediction") or {}
                 probs = ncp.get("probabilities") or {}
                 if probs:
-                    best_key = max(probs, key=lambda k: probs[k])
-                    next_cycle_zh = format_cycle_with_direction(best_key, ncp.get("direction"))
+                    best_key = _best_probability_key(probs)
+                    if best_key:
+                        next_cycle_zh = format_cycle_with_direction(best_key, ncp.get("direction"))
                 else:
                     cycle_key = ncp.get("cycle")
                     if cycle_key:
@@ -3596,6 +3645,13 @@ class MainWindow(QMainWindow):
         """Push the full AnalysisRecord to the conversation and debug tabs."""
         if not self._ui_is_alive():
             return
+        try:
+            self._on_record_ready_impl(record)
+        except Exception as exc:  # noqa: BLE001
+            self._last_analysis_had_error = True
+            logger.exception("Record ready handler failed: %s", exc)
+
+    def _on_record_ready_impl(self, record: Any) -> None:
         self._last_analysis_record = record
         import json as _json
 
@@ -3900,6 +3956,87 @@ class MainWindow(QMainWindow):
             confidence_threshold=self._confidence_threshold(),
         )
 
+    def _spawn_post_order_followup(self, inner: dict, decision: dict) -> None:
+        """Run trade CSV/chart + notifications off the UI thread (can take seconds)."""
+        import threading
+
+        settings = getattr(self._ctx, "settings", None)
+        model_name = ""
+        meta_symbol = ""
+        meta_timeframe = ""
+        decision_stance = ""
+        if settings is not None:
+            model_name = getattr(settings.provider, "model", "") or ""
+            meta_symbol = getattr(settings.general, "last_symbol", "") or ""
+            meta_timeframe = getattr(settings.general, "last_timeframe", "") or ""
+            decision_stance = getattr(settings.general, "decision_stance", "") or ""
+        stage1_diag = self._current_stage1_diagnosis() or None
+        frame = getattr(self, "_last_analysis_frame", None)
+
+        def _run() -> None:
+            try:
+                from pa_agent.records.trade_logger import save_trade_record
+
+                save_trade_record(
+                    decision_inner=inner,
+                    stage2_full=decision,
+                    stage1_diagnosis=stage1_diag,
+                    frame=frame,
+                    meta_symbol=meta_symbol,
+                    meta_timeframe=meta_timeframe,
+                    decision_stance=decision_stance,
+                    model_name=model_name,
+                    structure_flip_cooldown_bars=int(
+                        getattr(settings.general, "structure_flip_cooldown_bars", 3) or 3
+                    )
+                    if settings is not None
+                    else 3,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Trade record logging failed: %s", exc)
+
+            try:
+                from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu_order
+                from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus_order
+                from pa_agent.records.trade_logger import _TRADE_RECORDS_DIR
+
+                safe_sym = meta_symbol.replace("/", "-").replace("\\", "-")
+                safe_tf = meta_timeframe.replace("/", "-")
+                img_glob = f"{safe_sym}_{safe_tf}_*.png"
+                candidates = sorted(
+                    _TRADE_RECORDS_DIR.glob(img_glob),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                latest_img = candidates[0] if candidates else None
+
+                send_feishu_order(
+                    decision_inner=inner,
+                    stage2_full=decision,
+                    symbol=meta_symbol,
+                    timeframe=meta_timeframe,
+                    chart_image_path=latest_img,
+                    settings=settings,
+                )
+                from pa_agent.notify.pushplus_notifier import pushplus_is_active
+
+                if pushplus_is_active(settings):
+                    send_pushplus_order(
+                        decision_inner=inner,
+                        stage2_full=decision,
+                        symbol=meta_symbol,
+                        timeframe=meta_timeframe,
+                        settings=settings,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("下单信号通知失败（不影响主流程）: %s", exc)
+
+        threading.Thread(
+            target=_run,
+            name="post-order-followup",
+            daemon=True,
+        ).start()
+
     def _maybe_alert_order_opportunity(self, decision_inner: dict) -> bool:
         """Beep, popup, and focus decision tab when stage-2 proposes an order."""
         if not self._order_opportunity_alert_enabled():
@@ -4098,14 +4235,16 @@ class MainWindow(QMainWindow):
             self._apply_chart_display_settings()
 
     def _apply_chart_display_settings(self) -> None:
-        """Sync chart label font sizes from persisted general settings."""
+        """Sync chart label font sizes and decision-flow zoom from persisted settings."""
         chart = getattr(self, "_chart_widget", None)
         settings = getattr(self._ctx, "settings", None)
-        if chart is None or settings is None:
-            return
-        chart.set_seq_label_font_pt(
-            int(getattr(settings.general, "chart_seq_label_font_pt", 7) or 7)
-        )
+        if chart is not None and settings is not None:
+            chart.set_seq_label_font_pt(
+                int(getattr(settings.general, "chart_seq_label_font_pt", 7) or 7)
+            )
+        flow_viz = getattr(self, "_decision_flow_viz_panel", None)
+        if flow_viz is not None:
+            flow_viz.refit_view()
 
     def _update_ai_mode_label(self) -> None:
         """Show current thinking / reasoning_effort / model in the toolbar."""

@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from pa_agent.ai.coherence_checks import BAR_BY_BAR_TARGET_COUNT
 from pa_agent.ai.trace_normalize import normalize_stage1_traces
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ _STRATEGY_FILE_ALIASES: dict[str, str] = {
 }
 
 _BAR_ROLE_ALIASES: dict[str, str] = {
+    "reversal_attempt": "signal",
+    "reversal": "signal",
     "continue": "confirmation",
     "continued": "confirmation",
     "continuation": "confirmation",
@@ -29,7 +32,6 @@ _BAR_ROLE_ALIASES: dict[str, str] = {
     "follow-through": "confirmation",
     "confirm": "confirmation",
     "confirmed": "confirmation",
-    "reversal": "signal",
     "breakout": "signal",
     "setup": "signal",
     "pullback": "test",
@@ -98,6 +100,8 @@ _CONTEXT_EFFECT_ALIASES: dict[str, str] = {
     "weakens_bear": "weakens_bear",
     "weaken_bull": "weakens_bull",
     "weaken_bear": "weakens_bear",
+    "weakened_bull": "weakened_bull",
+    "weakened_bear": "weakened_bear",
     "weakens_bulls": "weakens_bull",           # AI typo: extra 's'
     "weakens_bears": "weakens_bear",           # AI typo: extra 's'
     "neutral": "neutral",
@@ -290,8 +294,12 @@ def _normalize_signal_bar_object(out: dict[str, Any]) -> bool:
     if isinstance(signal_bar, dict):
         if not str(signal_bar.get("reason", "") or "").strip():
             signal_bar["reason"] = "见 bar_by_bar_summary"
-        signal_bar.setdefault("bar", None)
-        signal_bar.setdefault("quality", "invalid")
+        if "bar" not in signal_bar:
+            signal_bar["bar"] = None
+        q = signal_bar.get("quality")
+        if q is None or not isinstance(q, str) or not str(q).strip():
+            # setdefault skips explicit null; schema requires enum string
+            signal_bar["quality"] = "invalid" if signal_bar.get("bar") is None else "weak"
         return False
 
     inferred = _infer_signal_bar_from_summary(out.get("bar_by_bar_summary"))
@@ -324,7 +332,8 @@ def _normalize_signal_bar_quality(out: dict[str, Any]) -> None:
     if not isinstance(signal_bar, dict):
         return
     quality = signal_bar.get("quality")
-    if not isinstance(quality, str):
+    if quality is None or not isinstance(quality, str) or not str(quality).strip():
+        signal_bar["quality"] = "invalid" if signal_bar.get("bar") is None else "weak"
         return
     key = quality.strip().lower()
     normalized = _SIGNAL_BAR_QUALITY_ALIASES.get(key)
@@ -355,7 +364,7 @@ def _pad_bar_by_bar_summary_to_minimum(
     *,
     kline_frame: Any = None,
 ) -> None:
-    """Pad bar_by_bar_summary to min(8, n_bars) using geometry stubs for missing K1..Kn."""
+    """Pad bar_by_bar_summary to min(BAR_BY_BAR_TARGET_COUNT, n_bars) using geometry stubs."""
     summary = out.get("bar_by_bar_summary")
     if not isinstance(summary, list) or kline_frame is None:
         return
@@ -366,7 +375,8 @@ def _pad_bar_by_bar_summary_to_minimum(
     if n_bars < 1:
         return
 
-    expected_min = min(8, n_bars) if n_bars >= 8 else n_bars
+    target = BAR_BY_BAR_TARGET_COUNT
+    expected_min = min(target, n_bars) if n_bars >= target else n_bars
     if len(summary) >= expected_min:
         return
 
@@ -548,7 +558,25 @@ def normalize_stage1(
 
     from pa_agent.ai.pattern_routing import ensure_detected_patterns_coherent
 
-    ensure_detected_patterns_coherent(out)
+    if kline_frame is not None:
+        try:
+            from pa_agent.ai.market_features import build_program_features_dict
+
+            out["program_features"] = build_program_features_dict(kline_frame)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("build_program_features_dict failed: %s", exc)
+
+    ensure_detected_patterns_coherent(out, kline_frame=kline_frame)
+
+    if not out.get("climax_risk"):
+        patterns = out.get("detected_patterns") or []
+        if isinstance(patterns, list):
+            if "climax_triggered" in patterns:
+                out["climax_risk"] = "triggered"
+            elif "climax_warning" in patterns:
+                out["climax_risk"] = "warning"
+        if not out.get("climax_risk"):
+            out["climax_risk"] = "none"
 
     _hoist_bar_by_bar_summary(out)
     normalize_stage1_traces(out, normalization_mode=normalization_mode)

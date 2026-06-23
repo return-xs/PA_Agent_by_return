@@ -14,6 +14,9 @@ from pa_agent.util.price_tick import (
 
 logger = logging.getLogger(__name__)
 
+# Max length for decision.reasoning (stage-2 trade rationale paragraph).
+DECISION_REASONING_MAX_LEN = 280
+
 # ── Model alias mappings (Stage 1 normalizer has the same; keep in sync) ──
 
 _SIGNAL_BAR_QUALITY_ALIASES: dict[str, str] = {
@@ -121,6 +124,7 @@ _NO_ORDER_PRICE_FIELDS = (
     "order_direction",
     "entry_price",
     "take_profit_price",
+    "take_profit_price_2",
     "stop_loss_price",
     "entry_basis_bar",
     "entry_basis_extreme",
@@ -479,6 +483,21 @@ def _ensure_decision_required_fields(
     return changed
 
 
+def _truncate_decision_reasoning(decision: dict[str, Any]) -> bool:
+    """Cap decision.reasoning length to avoid verbose JSON and schema failures."""
+    reasoning = decision.get("reasoning")
+    if not isinstance(reasoning, str):
+        return False
+    text = reasoning.strip()
+    if len(text) <= DECISION_REASONING_MAX_LEN:
+        if text != reasoning:
+            decision["reasoning"] = text
+            return True
+        return False
+    decision["reasoning"] = text[: DECISION_REASONING_MAX_LEN - 1] + "…"
+    return True
+
+
 def _trace_node_answer(trace: Any, node_id: str) -> str | None:
     if not isinstance(trace, list):
         return None
@@ -731,6 +750,9 @@ def _coerce_decision_when_trade_metrics_fail(
         decision,
         decision_stance=decision_stance,
         kline_frame=kline_frame,
+        bar_analysis=out.get("bar_analysis")
+        if isinstance(out.get("bar_analysis"), dict)
+        else None,
     )
     if not metric_errors:
         return False
@@ -1249,6 +1271,59 @@ def _max_bar_seq_from_frame(kline_frame: Any) -> int | None:
     return max(seqs) if seqs else None
 
 
+def _fix_background_limit_trace(out: dict[str, Any]) -> bool:
+    """Ensure §9.0P=是 when a planned limit order follows §9.0=否."""
+    try:
+        from pa_agent.ai.decision_nodes import is_planned_limit_order
+    except ImportError:
+        return False
+    if not is_planned_limit_order(out):
+        return False
+    trace = out.get("decision_trace")
+    if not isinstance(trace, list):
+        return False
+
+    node_90: dict[str, Any] | None = None
+    node_90p: dict[str, Any] | None = None
+    for item in trace:
+        if not isinstance(item, dict):
+            continue
+        nid = str(item.get("node_id", "")).strip()
+        if nid == "9.0":
+            node_90 = item
+        elif nid == "9.0P":
+            node_90p = item
+
+    changed = False
+    if node_90 is not None:
+        ans = str(node_90.get("answer", "") or "").strip()
+        if ans in ("否", "等待"):
+            if node_90p is None:
+                trace.insert(
+                    trace.index(node_90) + 1,
+                    {
+                        "node_id": "9.0P",
+                        "section": "入场信号",
+                        "question": "背景驱动限价单评估（§9.0=否 时必须评估）",
+                        "answer": "是",
+                        "reason": (
+                            "程序校正：计划型限价单，周期/结构位支持挂限价，"
+                            "继续 §10 定三价。"
+                        ),
+                        "skipped": False,
+                        "bar_range": "K10-K1",
+                    },
+                )
+                changed = True
+            elif str(node_90p.get("answer", "") or "").strip() in ("否", "等待"):
+                node_90p["answer"] = "是"
+                base = str(node_90p.get("reason", "") or "").strip()
+                suffix = "（程序校正：背景限价路径，非信号棒路径。）"
+                node_90p["reason"] = f"{base}{suffix}".strip() if base else suffix.strip()
+                changed = True
+    return changed
+
+
 def _fix_9_0_for_planned_limit(out: dict[str, Any]) -> bool:
     """When model outputs a valid planned limit but §9.0=否, upgrade to 是."""
     try:
@@ -1289,6 +1364,8 @@ def normalize_stage2(
     decision_stance: str | None = None,
     stage1_json: dict[str, Any] | None = None,
     skip_next_bar: bool = False,
+    previous_record: Any | None = None,
+    structure_flip_cooldown_bars: int = 3,
 ) -> dict[str, Any]:
     """Return a copy of *obj* with decision_trace quirks corrected."""
     out = copy.deepcopy(obj)
@@ -1298,6 +1375,9 @@ def normalize_stage2(
     if isinstance(decision, dict):
         _normalize_order_type_aliases(decision)
     _ensure_decision_required_fields(out, stage1_json=stage1_json)
+    decision = out.get("decision")
+    if isinstance(decision, dict):
+        _truncate_decision_reasoning(decision)
     _normalize_stage2_enum_aliases(out)
     _normalize_stage2_bar_analysis_enums(out, stage1_json=stage1_json)
     _coerce_decision_no_order(out)
@@ -1316,11 +1396,18 @@ def normalize_stage2(
             "breakout entry_price adjusted to basis extreme ± 1 tick (basis=%s)",
             decision.get("entry_basis_bar"),
         )
+    if isinstance(decision, dict):
+        from pa_agent.util.trade_metrics import adjust_decision_stop_for_tp1_rr_cap
+
+        if adjust_decision_stop_for_tp1_rr_cap(decision, kline_frame=kline_frame):
+            logger.debug("stop_loss widened to bring TP1 RR within program cap")
     _coerce_decision_when_trade_metrics_fail(
         out,
         decision_stance=decision_stance,
         kline_frame=kline_frame,
     )
+    if _fix_background_limit_trace(out):
+        logger.debug("Ensured §9.0P for background planned limit order")
     if _fix_9_0_for_planned_limit(out):
         logger.debug("Upgraded §9.0 to 是 for planned limit order")
 
@@ -1464,5 +1551,22 @@ def normalize_stage2(
     pred_c = out.get("next_cycle_prediction")
     if isinstance(pred_c, dict):
         _normalize_next_cycle_prediction(pred_c, stage1_json=stage1_json)
+
+    if kline_frame is not None and stage1_json:
+        try:
+            from pa_agent.ai.decision_continuity import (
+                apply_continuity_guard,
+                build_continuity_context,
+            )
+
+            ctx = build_continuity_context(
+                frame=kline_frame,
+                stage1_json=stage1_json,
+                previous_record=previous_record,
+                cooldown_bars=structure_flip_cooldown_bars,
+            )
+            out = apply_continuity_guard(out, ctx)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_continuity_guard failed: %s", exc)
 
     return out

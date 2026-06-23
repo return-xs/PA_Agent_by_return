@@ -1,7 +1,7 @@
 """飞书自定义机器人通知模块.
 
 在下单决策触发时，向飞书群推送交互卡片消息，内容包含：
-  - 品种 / 周期 / 方向 / 下单类型 / 入场价 / 止损 / 止盈
+  - 品种 / 周期 / 方向 / 下单类型 / 入场价 / 止损 / TP1 / TP2
   - 交易置信度 / 预估胜率
   - 决策理由 (decision.reasoning)
   - 下一个市场周期预期及理由 (next_cycle_prediction)
@@ -196,6 +196,7 @@ def _build_card(
     entry = _fmt(dec.get("entry_price"))
     stop = _fmt(dec.get("stop_loss_price"))
     tp = _fmt(dec.get("take_profit_price"))
+    tp2 = _fmt(dec.get("take_profit_price_2"))
     reasoning = _truncate((dec.get("reasoning") or "").strip(), 600)
     trade_conf = _fmt(dec.get("trade_confidence"))
     win_rate = _fmt(dec.get("estimated_win_rate"))
@@ -225,7 +226,7 @@ def _build_card(
             "content": (
                 f"**品种**：{symbol}　**周期**：{timeframe}\n"
                 f"**下单类型**：{order_type}　**方向**：{dir_label}\n"
-                f"**入场价**：{entry}　**止损**：{stop}　**止盈**：{tp}\n"
+                f"**入场价**：{entry}　**止损**：{stop}　**TP1**：{tp}　**TP2**：{tp2}\n"
                 f"**置信度**：{trade_conf}　**预估胜率**：{win_rate}"
             ),
         }

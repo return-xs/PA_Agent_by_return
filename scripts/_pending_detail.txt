@@ -1,0 +1,12 @@
+﻿python :   File "<string>", line 62
+所在位置 C:\Users\Administrator\AppData\Local\Temp\2\ps-script-fe3b6f85-9f88-48e0-9a64-e95bc51f18fa.ps1:75 字符: 108
++ ... _records.py > scripts/_pending_analysis.txt 2>&1; python -X utf8 -c "
++                                                       ~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "<string>", line 62:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    print('\nhas signal bar but still no order:', sum(1 for fp in files if json.loads(fp.read_text(encoding='utf-8')).g
+et('stage2_decision',{}).get('decision',{}).get('order_type')=='涓嶄笅鍗? and (json.loads(fp.read_text(encoding='utf-8')).g
+et('stage2_decision',{}).get('bar_analysis',{}).get('signal_bar',{}).get('bar') is not None))
+         ^
+SyntaxError: '(' was never closed

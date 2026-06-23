@@ -902,7 +902,7 @@ class DecisionFlowVizPanel(QWidget):
         """Scale applied after fitInView (1.0 = fit size; no upper cap—uses settings % / 100)."""
         if self._settings is None:
             return 5.0
-        pct = int(getattr(self._settings.general, "decision_flow_default_zoom_pct", 500))
+        pct = int(getattr(self._settings.general, "decision_flow_default_zoom_pct", 600))
         return max(0.25, pct / 100.0)
 
     def eventFilter(self, obj: Any, event: QEvent) -> bool:  # noqa: N802
@@ -1025,6 +1025,12 @@ class DecisionFlowVizPanel(QWidget):
         dlg.showMaximized()
         QTimer.singleShot(180, panel.play_path)
         dlg.exec()
+
+    def refit_view(self) -> None:
+        """Re-apply default zoom (e.g. after user changes decision_flow_default_zoom_pct)."""
+        if self._last_trace_kw is None and not self._last_placed:
+            return
+        self._fit_scene(self._last_rect)
 
     def clear(self) -> None:
         self._stop_playback()

@@ -78,6 +78,12 @@ class PendingWriter:
         data = record.model_dump()
         data = self._sanitize(data, self._api_key)
         self._write_json(path, data)
+        try:
+            from pa_agent.records.analysis_history import invalidate_latest_record_cache
+
+            invalidate_latest_record_cache()
+        except Exception:  # noqa: BLE001
+            pass
         return path
 
     def save_partial(self, record: AnalysisRecord, reason: str) -> Path:

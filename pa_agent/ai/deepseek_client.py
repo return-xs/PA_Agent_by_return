@@ -81,18 +81,22 @@ def _is_deepseek_native(base_url: str) -> bool:
 def _is_deepseek_model(model: str) -> bool:
     """True for DeepSeek model ids; excludes QClaw ``openclaw`` and WorkBuddy ``openclaw_wb`` Agent aliases."""
     m = (model or "").lower()
-    if m in ("openclaw", "openclaw_wb"):
+    if m in ("openclaw", "openclaw_wb", "openclaw_cs"):
         return False
-    if m.startswith("openclaw/") or m.startswith("openclaw_wb/"):
+    if m.startswith("openclaw/") or m.startswith("openclaw_wb/") or m.startswith("openclaw_cs/"):
         return False
     return "deepseek" in m
 
 
 def _is_qclaw_openclaw_agent(settings: AIProviderSettings) -> bool:
     """True when requests go through QClaw's public-gateway OpenClaw Agent."""
+    from pa_agent.ai.cursor_connector import is_openclaw_cs_model
     from pa_agent.ai.qclaw_connector import detect_qclaw, is_openclaw_model
 
-    return bool(is_openclaw_model(settings.model) and detect_qclaw())
+    if not detect_qclaw():
+        return False
+    model = settings.model or ""
+    return is_openclaw_model(model) or is_openclaw_cs_model(model)
 
 
 def _openclaw_agent_request_extra(settings: AIProviderSettings) -> dict[str, Any]:
@@ -109,8 +113,49 @@ def _is_workbuddy_agent(settings: AIProviderSettings) -> bool:
     return is_workbuddy_route(settings)
 
 
+def _is_openclaw_agent_model(model: str) -> bool:
+    """True for QClaw/WorkBuddy/Cursor OpenClaw Agent model aliases."""
+    m = (model or "").lower()
+    return (
+        m in ("openclaw", "openclaw_wb", "openclaw_cs")
+        or m.startswith("openclaw/")
+        or m.startswith("openclaw_wb/")
+        or m.startswith("openclaw_cs/")
+    )
+
+
+def supports_kv_prefix_chain(settings: AIProviderSettings | None) -> bool:
+    """Whether Stage 2 may chain after Stage 1 messages for DeepSeek KV prefix cache.
+
+    OpenClaw Agent routes misread ``system + stage1_user + stage2_user`` as a
+    finished chat and reply with prose menus; those providers stay standalone.
+    """
+    if settings is None:
+        return True
+    if _is_qclaw_openclaw_agent(settings) or _is_workbuddy_agent(settings):
+        return False
+    if _is_openclaw_agent_model(settings.model):
+        return False
+    return _is_deepseek_native(settings.base_url) or _is_deepseek_model(settings.model)
+
+
+def _extract_cached_prompt_tokens(usage: Any) -> int:
+    """Read KV-cache hit count from provider usage (DeepSeek or OpenAI-compat)."""
+    if usage is None:
+        return 0
+    hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    if hit is not None:
+        return int(hit or 0)
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        cached = getattr(details, "cached_tokens", 0)
+        if cached:
+            return int(cached)
+    return 0
+
+
 def _effective_api_model(settings: AIProviderSettings) -> str:
-    """Model id sent to the upstream API (resolve WorkBuddy aliases)."""
+    """Model id sent to the upstream API (resolve provider aliases)."""
     if _is_workbuddy_agent(settings):
         from pa_agent.ai.workbuddy_connector import resolve_workbuddy_api_model
 
@@ -477,9 +522,7 @@ class DeepSeekClient:
         u = response.usage
         usage = AIUsage(
             prompt_tokens=getattr(u, "prompt_tokens", 0),
-            cached_prompt_tokens=getattr(
-                getattr(u, "prompt_tokens_details", None), "cached_tokens", 0
-            ) if u else 0,
+            cached_prompt_tokens=_extract_cached_prompt_tokens(u),
             completion_tokens=getattr(u, "completion_tokens", 0),
             total_tokens=getattr(u, "total_tokens", 0),
         )
@@ -637,8 +680,7 @@ class DeepSeekClient:
                     prompt_tokens = getattr(u, "prompt_tokens", 0) or prompt_tokens
                     completion_tokens = getattr(u, "completion_tokens", 0) or completion_tokens
                     total_tokens = getattr(u, "total_tokens", 0) or total_tokens
-                    details = getattr(u, "prompt_tokens_details", None)
-                    cached_tokens = getattr(details, "cached_tokens", 0) if details else cached_tokens
+                    cached_tokens = _extract_cached_prompt_tokens(u) or cached_tokens
 
                 if not getattr(chunk, "choices", None):
                     continue

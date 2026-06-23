@@ -162,11 +162,15 @@ class ChartWidget(pg.PlotWidget):
 
         entry = decision.get("entry_price")
         tp = decision.get("take_profit_price")
+        tp2 = decision.get("take_profit_price_2")
         sl = decision.get("stop_loss_price")
 
         if entry is not None and tp is not None and sl is not None:
             try:
-                self._overlay.set_lines(self, float(entry), float(tp), float(sl))
+                tp2_val = float(tp2) if tp2 is not None else None
+                self._overlay.set_lines(
+                    self, float(entry), float(tp), float(sl), tp2=tp2_val
+                )
             except (TypeError, ValueError):
                 self._overlay.clear_lines(self)
         else:
@@ -442,7 +446,12 @@ class ChartWidget(pg.PlotWidget):
 
         decision = self._pending_decision
         if decision is not None:
-            for key in ("entry_price", "take_profit_price", "stop_loss_price"):
+            for key in (
+                "entry_price",
+                "take_profit_price",
+                "take_profit_price_2",
+                "stop_loss_price",
+            ):
                 raw = decision.get(key)
                 if raw is None:
                     continue

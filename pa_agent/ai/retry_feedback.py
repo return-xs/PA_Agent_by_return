@@ -99,6 +99,18 @@ def build_retry_feedback(
         lines.append("")
         lines.append(geo)
 
+    if stage == "stage1" and (
+        any("gate_trace" in inv and "answer" in inv for inv in invalid)
+        or "冲突" in getattr(err, "message", "")
+    ):
+        lines.append("")
+        lines.append("**gate_trace answer 枚举提示：**")
+        lines.append(
+            "- §2.2：`answer` 只能用 **是/否/中性/等待/不适用**；"
+            "「同向/冲突/背景中性」写在 `branch`（如 aligned / conflict / neutral_background），"
+            "**禁止**把「冲突」写在 answer。"
+        )
+
     lines.append("")
     lines.append(
         "请根据以上说明，在 assistant 正文 `content` 输出**完整**阶段"

@@ -29,6 +29,15 @@ _GATE_12_GENERIC_BRANCHES = frozenset(
 
 _BAR_RANGE_RE = re.compile(r"^K(\d+)-K(\d+)$", re.IGNORECASE)
 _SINGLE_BAR_RE = re.compile(r"^K(\d+)$", re.IGNORECASE)
+_PROG_REF_BLOCK_RE = re.compile(r"【程序参考数据（[^】]*）：.*?】", re.DOTALL)
+
+# Model-invented summary nodes (not in decision tree); gate_result belongs in gate_result field.
+_GATE_END_NODE_IDS = frozenset({"gate_end", "gate_summary", "summary"})
+_GATE_RESULT_ANSWER_ALIASES: dict[str, str] = {
+    "proceed": "是",
+    "wait": "等待",
+    "unknown": "中性",
+}
 
 # node_id -> {raw answer -> (canonical answer, branch)}
 _NODE_ANSWER_BY_ID: dict[str, dict[str, tuple[str, str]]] = {
@@ -97,6 +106,21 @@ _NODE_ANSWER_BY_ID: dict[str, dict[str, tuple[str, str]]] = {
         "A": ("是", "path_a"),
         "B": ("是", "path_b"),
         "C": ("是", "path_c"),
+    },
+    "2.2": {
+        "冲突": ("是", "conflict"),
+        "背景冲突": ("是", "conflict"),
+        "方向冲突": ("是", "conflict"),
+        "新旧冲突": ("是", "conflict"),
+        "conflict": ("是", "conflict"),
+        "同向": ("是", "aligned"),
+        "共振": ("是", "aligned"),
+        "方向一致": ("是", "aligned"),
+        "aligned": ("是", "aligned"),
+        "中性背景": ("中性", "neutral_background"),
+        "背景中性": ("中性", "neutral_background"),
+        "neutral_background": ("中性", "neutral_background"),
+        "mixed": ("中性", "mixed"),
     },
 }
 
@@ -785,11 +809,46 @@ def _repair_gate_result(obj: dict[str, Any]) -> None:
         )
 
 
+def _strip_program_reference_blocks(text: str) -> str:
+    """Remove merged program-metric blocks from trace reason (§2.5 cleanup)."""
+    cleaned = _PROG_REF_BLOCK_RE.sub("", text or "")
+    return " ".join(cleaned.split()).strip()
+
+
+def _repair_gate_trace_answer_aliases(gate: list[Any]) -> None:
+    """Map gate_result tokens mistakenly written as trace answer (e.g. proceed → 是)."""
+    for item in gate:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("answer", "") or "").strip()
+        mapped = _GATE_RESULT_ANSWER_ALIASES.get(raw.lower())
+        if mapped:
+            item["answer"] = mapped
+            branch = str(item.get("branch", "") or "").strip()
+            if raw.lower() == "proceed" and not branch:
+                item["branch"] = "proceed"
+
+
+def _strip_gate_end_nodes(gate: list[Any]) -> None:
+    """Drop model-invented gate_end / summary nodes from gate_trace."""
+    gate[:] = [
+        item
+        for item in gate
+        if not (
+            isinstance(item, dict)
+            and str(item.get("node_id", "") or "").strip().lower() in _GATE_END_NODE_IDS
+        )
+    ]
+
+
 def _repair_stage1_gate_trace(obj: dict[str, Any]) -> None:
     """Format-only repairs so strict trace semantics pass on good-faith AI output."""
     gate = obj.get("gate_trace")
     if not isinstance(gate, list) or not gate:
         return
+
+    _repair_gate_trace_answer_aliases(gate)
+    _strip_gate_end_nodes(gate)
 
     canonical_q = _canonical_gate_questions()
     for item in gate:
@@ -798,6 +857,11 @@ def _repair_stage1_gate_trace(obj: dict[str, Any]) -> None:
         nid = str(item.get("node_id", "") or "").strip()
         if nid in canonical_q:
             item["question"] = canonical_q[nid]
+        if nid in ("1.3", "2.5"):
+            reason = str(item.get("reason", "") or "")
+            stripped = _strip_program_reference_blocks(reason)
+            if stripped != reason.strip():
+                item["reason"] = stripped
 
     _sync_gate_23_answer_with_direction(obj)
     _repair_gate_result(obj)

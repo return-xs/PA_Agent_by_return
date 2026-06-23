@@ -213,6 +213,33 @@ def test_normalize_signal_bar_null_infers_from_summary() -> None:
     assert isinstance(result, Ok)
 
 
+def test_normalize_signal_bar_quality_null_when_bar_null() -> None:
+    """Regression: bar=null with quality=null fails schema; coerce to invalid."""
+    import json
+
+    from pa_agent.ai.json_validator import Ok
+
+    raw = {**VALID_STAGE1}
+    raw["bar_analysis"] = {
+        "always_in": "neutral",
+        "last_closed_bar": "K1",
+        "bar_type": "inside",
+        "signal_bar": {
+            "bar": None,
+            "quality": None,
+            "reason": "当前无有效信号棒，K2空头信号后K1反弹未确认",
+        },
+        "entry_setup_type": "none",
+        "follow_through": "pending",
+    }
+    out = normalize_stage1(raw)
+    sb = out["bar_analysis"]["signal_bar"]
+    assert sb["quality"] == "invalid"
+
+    result = schema_test_validator().validate("stage1", json.dumps(out, ensure_ascii=False))
+    assert isinstance(result, Ok)
+
+
 def test_normalize_bar_type_ine_truncation_passes_schema() -> None:
     """Regression: models truncate inside→ine in bar_analysis.bar_type."""
     import json
@@ -246,7 +273,21 @@ def test_normalize_bar_type_ine_truncation_passes_schema() -> None:
     assert isinstance(result, Ok)
 
 
-def test_pad_bar_by_bar_summary_when_model_only_sends_five_bars() -> None:
+def test_normalize_bar_by_bar_role_reversal_attempt_maps_to_signal() -> None:
+    raw = {
+        **VALID_STAGE1,
+        "bar_by_bar_summary": [
+            {
+                **VALID_STAGE1["bar_by_bar_summary"][0],
+                "role": "reversal_attempt",
+            }
+        ],
+    }
+    out = normalize_stage1(raw)
+    assert out["bar_by_bar_summary"][0]["role"] == "signal"
+
+
+def test_pad_bar_by_bar_summary_when_model_only_sends_three_bars() -> None:
     n = 100
     frame = KlineFrame(
         symbol="XAUUSD",
@@ -273,12 +314,12 @@ def test_pad_bar_by_bar_summary_when_model_only_sends_five_bars() -> None:
     summary = [
         {"bar": f"K{i}", "role": "structure", "bar_type": "doji", "context_effect": "neutral",
          "follow_through": "no", "trapped_side": "none", "reason": f"棒K{i}"}
-        for i in (5, 4, 3, 2, 1)
+        for i in (3, 2, 1)
     ]
     out = normalize_stage1({"bar_by_bar_summary": summary}, kline_frame=frame)
-    assert len(out["bar_by_bar_summary"]) == 8
+    assert len(out["bar_by_bar_summary"]) == 5
     bars = [item["bar"] for item in out["bar_by_bar_summary"]]
-    assert bars == [f"K{i}" for i in range(8, 0, -1)]
+    assert bars == [f"K{i}" for i in range(5, 0, -1)]
     errs = validate_stage1_coherence(
         {**VALID_STAGE1, "bar_by_bar_summary": out["bar_by_bar_summary"]},
         kline_frame=frame,

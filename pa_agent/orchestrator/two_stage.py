@@ -605,11 +605,13 @@ class TwoStageOrchestrator:
         direction = str(stage1_json.get("direction", "") or "")
         patterns = stage1_json.get("detected_patterns") or []
         prompt_cfg = getattr(self._settings, "prompt", None) if self._settings else None
-        max_exp = getattr(prompt_cfg, "experience_max_entries", 3) if prompt_cfg else 3
+        max_exp = getattr(prompt_cfg, "experience_max_entries", 0) if prompt_cfg else 0
         max_chars = (
             getattr(prompt_cfg, "experience_max_chars_per_entry", 400) if prompt_cfg else 400
         )
-        if hasattr(self._exp_reader, "read_for_stage2"):
+        if max_exp <= 0:
+            experience_entries = []
+        elif hasattr(self._exp_reader, "read_for_stage2"):
             experience_entries = self._exp_reader.read_for_stage2(
                 cycle_position,
                 direction=direction,
@@ -685,6 +687,14 @@ class TwoStageOrchestrator:
         _enable_next_bar = bool(
             getattr(getattr(self._settings, "general", None), "enable_next_bar_prediction", False)
         )
+        _flip_cooldown = int(
+            getattr(
+                getattr(self._settings, "general", None),
+                "structure_flip_cooldown_bars",
+                3,
+            )
+            or 3
+        )
         messages_s2 = self._assembler.build_stage2_continuation(
             frame=frame,
             stage1_messages=messages_s1,
@@ -695,6 +705,8 @@ class TwoStageOrchestrator:
             decision_stance=record.meta.decision_stance,
             previous_record=previous_record,
             enable_next_bar_prediction=_enable_next_bar,
+            provider_settings=getattr(self._settings, "provider", None),
+            structure_flip_cooldown_bars=_flip_cooldown,
         )
 
         # ── Step 15: Call AI for Stage 2 ──────────────────────────────────────
@@ -842,6 +854,8 @@ class TwoStageOrchestrator:
                 "decision_stance": record.meta.decision_stance,
                 "stage1_json": stage1_json,
                 "skip_next_bar": not _enable_next_bar,
+                "previous_record": previous_record,
+                "structure_flip_cooldown_bars": _flip_cooldown,
             },
             call_api=_call_s2_retry,
             provider_settings=getattr(self._settings, "provider", None),
@@ -922,6 +936,19 @@ class TwoStageOrchestrator:
         elif _enable_next_bar:
             logger.info("next_bar_prediction absent from stage2 response")
 
+        _nc_pred = _pred.get("next_cycle_prediction")
+        if isinstance(_nc_pred, dict):
+            if _nc_pred.get("unpredictable"):
+                logger.info("next_cycle_prediction cycle=null unpredictable=true")
+            else:
+                logger.info(
+                    "next_cycle_prediction cycle=%s direction=%s unpredictable=false",
+                    _nc_pred.get("cycle"),
+                    _nc_pred.get("direction"),
+                )
+        else:
+            logger.info("next_cycle_prediction absent from stage2 response")
+
         # ── Step 20: Build final record ───────────────────────────────────────
         usage_total = _accumulate_usage_calls(
             _accumulate_usage_calls(record.usage_total, s1_usage_calls),
@@ -959,7 +986,7 @@ class TwoStageOrchestrator:
     def _thinking_params(self) -> tuple[bool, str]:
         """Return (thinking, reasoning_effort) from settings defaults."""
         if self._settings is None:
-            return True, "max"
+            return True, "high"
         p = self._settings.provider
         return p.thinking, p.reasoning_effort
 
@@ -979,6 +1006,7 @@ class TwoStageOrchestrator:
             self._settings.provider.model if self._settings is not None else ""
         )
         tried_qclaw = False
+        tried_cursor = False
         tried_workbuddy = False
         while True:
             try:
@@ -1001,6 +1029,15 @@ class TwoStageOrchestrator:
                     tried_workbuddy = True
                     logger.info(
                         "%s network error (%s); applied WorkBuddy provider — retrying",
+                        stage_label,
+                        exc,
+                    )
+                elif not tried_cursor and self._try_cursor_fallback(
+                    original_model=original_model
+                ):
+                    tried_cursor = True
+                    logger.info(
+                        "%s network error (%s); applied Cursor provider — retrying",
                         stage_label,
                         exc,
                     )
@@ -1046,6 +1083,44 @@ class TwoStageOrchestrator:
 
         logger.info(
             "QClaw auto-fallback: model=%s base_url=%s",
+            self._settings.provider.model,
+            self._settings.provider.base_url,
+        )
+        return True
+
+    def _try_cursor_fallback(self, *, original_model: str = "") -> bool:
+        """Apply Cursor route via QClaw (like settings Save with model=openclaw_cs)."""
+        from pa_agent.ai.cursor_connector import (
+            apply_cursor_provider_to_settings,
+            is_openclaw_cs_model,
+        )
+        from pa_agent.config.paths import SETTINGS_JSON_PATH
+
+        if not is_openclaw_cs_model(original_model):
+            return False
+        if self._settings is None:
+            return False
+
+        from pa_agent.config.settings import save_settings
+        from pa_agent.util.logging import update_api_key
+
+        err = apply_cursor_provider_to_settings(
+            self._settings,
+            preferred_model=original_model,
+        )
+        if err:
+            logger.warning("Cursor auto-fallback unavailable: %s", err)
+            return False
+
+        self._client.update_provider(self._settings.provider)
+        try:
+            save_settings(self._settings, SETTINGS_JSON_PATH)
+            update_api_key(self._settings.provider.api_key)
+        except Exception as save_exc:  # noqa: BLE001
+            logger.warning("Cursor fallback applied but settings save failed: %s", save_exc)
+
+        logger.info(
+            "Cursor auto-fallback: model=%s base_url=%s",
             self._settings.provider.model,
             self._settings.provider.base_url,
         )

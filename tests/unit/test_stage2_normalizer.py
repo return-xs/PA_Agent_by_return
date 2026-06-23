@@ -274,6 +274,36 @@ def test_normalize_next_bar_prediction_features_used_min_set():
     assert pred["features_used"][0] == "stage1_diagnosis"
 
 
+def test_normalize_decision_reasoning_truncation() -> None:
+    """decision.reasoning > 280 chars gets truncated."""
+    from pa_agent.ai.stage2_normalizer import DECISION_REASONING_MAX_LEN, normalize_stage2
+
+    obj = {
+        "decision": {
+            "order_type": "不下单",
+            "order_direction": None,
+            "entry_price": None,
+            "take_profit_price": None,
+            "stop_loss_price": None,
+            "reasoning": "长" * 400,
+            "diagnosis_confidence": 60,
+            "diagnosis_confidence_reasoning": "t",
+            "trade_confidence": 40,
+            "trade_confidence_reasoning": "t",
+            "estimated_win_rate": None,
+            "estimated_win_rate_reasoning": None,
+            "key_factors": [],
+            "watch_points": [],
+            "risk_assessment": "t",
+        },
+        "decision_trace": [],
+        "terminal": {"node_id": "10.2", "outcome": "wait", "label": "wait"},
+    }
+    out = normalize_stage2(obj)
+    assert len(out["decision"]["reasoning"]) == DECISION_REASONING_MAX_LEN
+    assert out["decision"]["reasoning"].endswith("…")
+
+
 def test_normalize_next_bar_prediction_reasoning_truncation():
     """Reasoning > 1500 chars gets truncated with ellipsis."""
     pred = {
@@ -403,6 +433,7 @@ def test_coerce_no_order_when_metrics_fail_after_breakout_entry_snap() -> None:
             "entry_basis_extreme": "low",
             "entry_rule": "K2 low - 1 tick",
             "take_profit_price": 10.50,
+            "take_profit_price_2": 10.30,
             "stop_loss_price": 10.84,
             "reasoning": "test",
             "diagnosis_confidence": 72,
@@ -473,6 +504,7 @@ def test_coerce_decision_when_103_no_but_prices_remain() -> None:
             "entry_basis_extreme": "high",
             "entry_rule": "K1 高点上方 1 跳动",
             "take_profit_price": 10.94,
+            "take_profit_price_2": 11.00,
             "stop_loss_price": 10.81,
             "reasoning": "方程不通过但仍写突破单",
             "diagnosis_confidence": 58,
@@ -535,6 +567,7 @@ def test_trade_terminal_14_repaired_to_order_node() -> None:
             "entry_basis_extreme": None,
             "entry_rule": None,
             "take_profit_price": 90.0,
+            "take_profit_price_2": 84.0,
             "stop_loss_price": 107.0,
             "reasoning": "test",
             "diagnosis_confidence": 70,
@@ -635,6 +668,7 @@ def test_signal_bar_bumped_when_same_seq_as_entry() -> None:
             "entry_basis_extreme": "low",
             "entry_rule": "test",
             "take_profit_price": 3.20,
+            "take_profit_price_2": 3.00,
             "stop_loss_price": 3.6,
             "reasoning": "t",
             "diagnosis_confidence": 50,
