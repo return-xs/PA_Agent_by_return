@@ -104,6 +104,12 @@ def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
     if kind == "csv":
         # CSV symbols are filenames — no gold/forex normalization.
         return sym
+    if kind == "binance":
+        # Binance symbols are uppercase pairs like HYPEUSDT.
+        sym_upper = sym.upper()
+        if sym_upper.endswith("USDT") or sym_upper.endswith("BUSD") or sym_upper.endswith("USDC"):
+            return sym_upper
+        return "HYPEUSDT"
     if kind in ("akshare", "eastmoney", "tushare"):
         code = normalize_ashare_symbol(sym)
         if not code or not _looks_like_ashare_code(code):

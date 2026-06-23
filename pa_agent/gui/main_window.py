@@ -370,7 +370,7 @@ class MainWindow(QMainWindow):
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
             "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、"
-            "CSV 文件（本地离线数据）"
+            "CSV 文件（本地离线数据）、币安（公开 API，无需密钥）"
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
@@ -1094,6 +1094,8 @@ class MainWindow(QMainWindow):
             line.setPlaceholderText("A股 6 位代码，如 600519；指数 000300 或 sh000300")
         elif kind == "csv":
             line.setPlaceholderText("选择 CSV 文件或点击 📂 选择目录")
+        elif kind == "binance":
+            line.setPlaceholderText("输入币安交易对，如 HYPEUSDT、BTCUSDT…")
         else:
             line.setPlaceholderText("输入 MT5 品种名，如 XAUUSDm…")
 
@@ -1255,6 +1257,15 @@ class MainWindow(QMainWindow):
             timeframe = self._tf_combo.currentText()
 
             new_source = create_data_source(kind)
+            # Binance: apply market setting from GeneralSettings.
+            if kind == "binance":
+                from pa_agent.data.binance_source import BinanceSource
+                if isinstance(new_source, BinanceSource):
+                    _s = getattr(self._ctx, "settings", None)
+                    _binance_market = "futures"
+                    if _s is not None:
+                        _binance_market = getattr(_s.general, 'binance_market', 'futures') or 'futures'
+                    new_source.set_market(_binance_market)
             # CSV: auto-select the correct symbol from available CSV files.
             # The symbol from the previous data source (e.g. "XAUUSDm") never
             # matches a CSV file stem, so we always resolve to the right one.
